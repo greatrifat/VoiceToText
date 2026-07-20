@@ -10,6 +10,9 @@ export type Meeting = {
   audioUrl: string | null;
   transcriptUrl: string | null;
   folderUrl: string | null;
+  /** Local file, kept until the Drive upload succeeds so a retry is possible. */
+  audioPath: string | null;
+  lastError: string | null;
 };
 
 export type NewMeeting = Omit<Meeting, 'id'>;
@@ -70,6 +73,35 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 3;
     `);
   }
+
+  if (version < 4) {
+    await db.execAsync(`
+      ALTER TABLE meetings ADD COLUMN audioPath TEXT;
+      ALTER TABLE meetings ADD COLUMN lastError TEXT;
+      PRAGMA user_version = 4;
+    `);
+  }
+}
+
+/** Patch a subset of columns; used as each pipeline stage completes. */
+export async function updateMeeting(
+  id: number,
+  fields: Partial<Omit<Meeting, 'id'>>
+): Promise<void> {
+  const entries = Object.entries(fields);
+  if (entries.length === 0) return;
+  const db = await getDb();
+  const assignments = entries.map(([column]) => `${column} = ?`).join(', ');
+  await db.runAsync(
+    `UPDATE meetings SET ${assignments} WHERE id = ?`,
+    ...entries.map(([, value]) => value as string | number | null),
+    id
+  );
+}
+
+export async function getMeeting(id: number): Promise<Meeting | null> {
+  const db = await getDb();
+  return db.getFirstAsync<Meeting>('SELECT * FROM meetings WHERE id = ?', id);
 }
 
 export type DailyUsage = { day: string; tokens: number; requests: number };
@@ -103,8 +135,9 @@ export async function insertMeeting(meeting: NewMeeting): Promise<number> {
   const db = await getDb();
   const result = await db.runAsync(
     `INSERT INTO meetings
-       (title, createdAt, durationSec, transcript, summary, audioUrl, transcriptUrl, folderUrl)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (title, createdAt, durationSec, transcript, summary,
+        audioUrl, transcriptUrl, folderUrl, audioPath, lastError)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     meeting.title,
     meeting.createdAt,
     meeting.durationSec,
@@ -112,7 +145,9 @@ export async function insertMeeting(meeting: NewMeeting): Promise<number> {
     meeting.summary,
     meeting.audioUrl,
     meeting.transcriptUrl,
-    meeting.folderUrl
+    meeting.folderUrl,
+    meeting.audioPath,
+    meeting.lastError
   );
   return result.lastInsertRowId;
 }

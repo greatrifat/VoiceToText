@@ -2,7 +2,7 @@
   "expo": {
     "name": "VoiceToText",
     "slug": "VoiceToText",
-    "version": "2.2.0",
+    "version": "2.8.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -20,7 +20,7 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "package": "com.robayet.voicetotext",
-      "versionCode": 4,
+      "versionCode": 10,
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.RECORD_AUDIO"
@@ -30,7 +30,12 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-audio",
+      [
+        "expo-audio",
+        {
+          "enableBackgroundRecording": true
+        }
+      ],
       "expo-secure-store",
       "expo-sqlite"
     ]

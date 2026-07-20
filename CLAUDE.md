@@ -50,16 +50,27 @@ Do not reintroduce `.env` / `EXPO_PUBLIC_*` for secrets — those are compiled i
 the APK and readable by anyone who unzips it. An earlier version did this; it was
 removed deliberately.
 
-### The transcript-preservation invariant
+### Nothing may lose a recording
 
-`RecordScreen.stopAndProcess` writes to SQLite in a `finally` block, on purpose.
-Once Gemini returns a transcript the user has already spent a meeting and an API
-call on it, so a later failure (summary, Drive upload, network) must never
-discard it. The row is saved with whatever URLs exist; a null `folderUrl` renders
-as "not in Drive" in History. Preserve this ordering when touching that function.
+`RecordScreen.stopAndProcess` moves the audio out of the cache directory and
+inserts the SQLite row **before any network call**. Everything after that point
+is retryable. The ordering is the invariant — do not move a network call ahead
+of the persist step.
 
-Summarization is likewise wrapped in its own try/catch — a failed summary is
-recoverable from History's *Generate summary* button, a lost transcript is not.
+`src/pipeline.ts` owns all post-recording work and runs only the stages a
+meeting still needs, which is what makes it double as the retry path: a meeting
+that transcribed but failed to upload re-uploads without paying Gemini again.
+Both `RecordScreen` and `MeetingDetail` call `processMeeting`; keep it that way
+rather than reimplementing stages in a screen.
+
+Audio lives in `Paths.document/recordings/` — **not** `Paths.cache`, which the OS
+purges under storage pressure. `audioPath` is cleared and the file deleted only
+once the Drive upload succeeds, since Drive then holds the durable copy. A
+meeting with `audioPath === null` and no `folderUrl` cannot be retried; the UI
+says so instead of offering a button that would fail.
+
+Summarization is wrapped in its own try/catch — a failed summary is recoverable
+from History, and must never block the upload.
 
 ### Database migrations
 
@@ -74,6 +85,22 @@ Each upload creates a **new** subfolder under `VoiceToText Meetings` holding
 `<title>.m4a`, `transcript.txt`, and `summary.txt`. Folders are never reused even
 on title collision — two meetings silently merging into one folder is worse than
 a duplicate the user can rename.
+
+### Quota is per model, not per account
+
+Free-tier **requests-per-day is metered separately for each model** (20/day each
+at time of writing). `src/gemini.ts` therefore treats a 429 as a reason to try
+the next model on the *same* key, and only moves to the next key once every
+model in `GEMINI_MODELS` is spent. Getting this backwards — as an earlier
+version did — throws away N-1 models' worth of free requests.
+
+`GEMINI_MODELS` must list distinct concrete models. Aliases (`gemini-flash-latest`)
+resolve onto one of them and share its bucket, so they add availability but no
+quota headroom.
+
+The two error classes drive different retries and must stay separate: `QuotaError`
+(429) → next model, then next key. `ModelUnavailableError` (404 / "no longer
+available") → next model only; another key won't help if the account lacks it.
 
 ### Audio constraints
 

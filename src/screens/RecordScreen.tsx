@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useState } from 'react';
 import {
   Alert,
   Linking,
+  PermissionsAndroid,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,11 +22,11 @@ import { File } from 'expo-file-system';
 
 import LevelMeter from '../components/LevelMeter';
 import ProcessingSteps, { type Step, type StepState } from '../components/ProcessingSteps';
-import { MAX_INLINE_AUDIO_BYTES } from '../config';
-import { insertMeeting } from '../db';
-import { uploadToDrive, type DriveUploadResult } from '../drive';
-import { summarizeTranscript, transcribeAudio } from '../gemini';
-import { MEETING_RECORDING_OPTIONS, RECORDING_MIME_TYPE, formatDuration } from '../recording';
+import CopyButton from '../components/CopyButton';
+import TranscriptView from '../components/TranscriptView';
+import { getMeeting, insertMeeting } from '../db';
+import { persistRecording, processMeeting } from '../pipeline';
+import { MEETING_RECORDING_OPTIONS, formatDuration } from '../recording';
 import { useSettings } from '../SettingsContext';
 import { validateSettings } from '../settings';
 import { colors, radius, space, text } from '../theme';
@@ -49,7 +51,8 @@ export default function RecordScreen() {
   const [stage, setStage] = useState<Stage>('idle');
   const [transcript, setTranscript] = useState('');
   const [summary, setSummary] = useState('');
-  const [drive, setDrive] = useState<DriveUploadResult | null>(null);
+  const [folderUrl, setFolderUrl] = useState<string | null>(null);
+  const [savedId, setSavedId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const capturing = stage === 'recording' || stage === 'paused';
@@ -82,8 +85,22 @@ export default function RecordScreen() {
         );
         return;
       }
+
+      // Android 13+ needs notification permission for the foreground service's
+      // ongoing notification. The service still runs without it, but the user
+      // gets no visible indication that recording is live.
+      if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
+        await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
+        ).catch(() => undefined);
+      }
+
+      // allowsBackgroundRecording binds expo-audio's microphone-type foreground
+      // service. Without it Android suspends the process when the screen turns
+      // off and the recording silently stops.
       await setAudioModeAsync({
         allowsRecording: true,
+        allowsBackgroundRecording: true,
         playsInSilentMode: true,
         shouldPlayInBackground: true,
       });
@@ -99,7 +116,8 @@ export default function RecordScreen() {
     setError(null);
     setTranscript('');
     setSummary('');
-    setDrive(null);
+    setFolderUrl(null);
+    setSavedId(null);
     await recorder.prepareToRecordAsync();
     recorder.record();
     setStage('recording');
@@ -115,6 +133,54 @@ export default function RecordScreen() {
     }
   }
 
+  function cancelRecording() {
+    const elapsed = formatDuration(recorderState.durationMillis / 1000);
+    // Pause first so the meeting is not still being captured while the user
+    // reads the dialog, and so "Keep recording" can simply resume.
+    const wasRecording = stage === 'recording';
+    if (wasRecording) recorder.pause();
+    setStage('paused');
+
+    Alert.alert(
+      'Discard this recording?',
+      `${elapsed} will be deleted. This cannot be undone — it is never transcribed or saved to Drive.`,
+      [
+        {
+          text: 'Keep recording',
+          style: 'cancel',
+          onPress: () => {
+            if (wasRecording) {
+              recorder.record();
+              setStage('recording');
+            }
+          },
+        },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: async () => {
+            await recorder.stop().catch(() => undefined);
+            const uri = recorder.uri;
+            if (uri) {
+              try {
+                const file = new File(uri);
+                if (file.exists) file.delete();
+              } catch {
+                // A stranded cache file is harmless — the OS clears it.
+              }
+            }
+            setStage('idle');
+            setError(null);
+            setTranscript('');
+            setSummary('');
+            setFolderUrl(null);
+            setSavedId(null);
+          },
+        },
+      ]
+    );
+  }
+
   async function stopAndProcess() {
     const durationSec = Math.round(recorderState.durationMillis / 1000);
     await recorder.stop();
@@ -125,66 +191,76 @@ export default function RecordScreen() {
       return;
     }
 
-    const title = `Meeting ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
-    let body = '';
-    let digest = '';
-    let result: DriveUploadResult | null = null;
+    const createdAt = Date.now();
+    const title = `Meeting ${new Date(createdAt).toISOString().slice(0, 16).replace('T', ' ')}`;
+
+    // Persist audio and create the row BEFORE any network call. Everything
+    // after this point is retryable; nothing after this point can lose the
+    // recording.
+    let meetingId: number;
+    try {
+      const audioPath = await persistRecording(uri, String(createdAt));
+      meetingId = await insertMeeting({
+        title,
+        createdAt,
+        durationSec,
+        transcript: '',
+        summary: '',
+        audioUrl: null,
+        transcriptUrl: null,
+        folderUrl: null,
+        audioPath,
+        lastError: null,
+      });
+    } catch (err) {
+      setError(
+        `Could not save the recording: ${err instanceof Error ? err.message : String(err)}`
+      );
+      setStage('idle');
+      return;
+    }
+
+    setSavedId(meetingId);
+    setError(null);
 
     try {
-      const file = new File(uri);
-      if (file.size && file.size > MAX_INLINE_AUDIO_BYTES) {
-        throw new Error(
-          `Recording is ${(file.size / 1024 / 1024).toFixed(1)}MB, above the ` +
-            `${MAX_INLINE_AUDIO_BYTES / 1024 / 1024}MB limit. Record a shorter session for now.`
-        );
-      }
-      const base64Audio = await file.base64();
-
-      setStage('transcribing');
-      body = await transcribeAudio({
-        apiKeys: settings.apiKeys,
-        base64Audio,
-        mimeType: RECORDING_MIME_TYPE,
+      const done = await processMeeting({
+        meetingId,
+        settings,
+        onStage: (next) => setStage(next === 'done' ? 'done' : next),
       });
-      setTranscript(body);
-
-      setStage('summarizing');
-      try {
-        digest = await summarizeTranscript({ apiKeys: settings.apiKeys, transcript: body });
-        setSummary(digest);
-      } catch {
-        // Recoverable from History; never worth failing the whole run over.
-        digest = '';
-      }
-
-      setStage('uploading');
-      result = await uploadToDrive({
-        driveUrl: settings.driveUrl,
-        driveSecret: settings.driveSecret,
-        base64Audio,
-        mimeType: RECORDING_MIME_TYPE,
-        fileName: title,
-        transcript: body,
-        summary: digest,
-      });
-      setDrive(result);
+      setTranscript(done.transcript);
+      setSummary(done.summary);
+      setFolderUrl(done.folderUrl);
       setStage('done');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setStage(body ? 'done' : 'idle');
-    } finally {
-      if (body) {
-        await insertMeeting({
-          title,
-          createdAt: Date.now(),
-          durationSec,
-          transcript: body,
-          summary: digest,
-          audioUrl: result?.audioUrl ?? null,
-          transcriptUrl: result?.transcriptUrl ?? null,
-          folderUrl: result?.folderUrl ?? null,
-        }).catch(() => undefined);
+      const saved = await getMeeting(meetingId).catch(() => null);
+      if (saved) {
+        setTranscript(saved.transcript);
+        setSummary(saved.summary);
+        setFolderUrl(saved.folderUrl);
       }
+      setStage('done');
+    }
+  }
+
+  async function retry() {
+    if (savedId == null) return;
+    setError(null);
+    try {
+      const done = await processMeeting({
+        meetingId: savedId,
+        settings,
+        onStage: (next) => setStage(next === 'done' ? 'done' : next),
+      });
+      setTranscript(done.transcript);
+      setSummary(done.summary);
+      setFolderUrl(done.folderUrl);
+      setStage('done');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStage('done');
     }
   }
 
@@ -197,6 +273,7 @@ export default function RecordScreen() {
           metering={recorderState.metering}
           onTogglePause={togglePause}
           onStop={stopAndProcess}
+          onCancel={cancelRecording}
         />
       )}
 
@@ -235,13 +312,27 @@ export default function RecordScreen() {
           {error && (
             <View style={styles.errorCard}>
               <Text style={styles.errorText}>{error}</Text>
+              {savedId != null && (
+                <>
+                  <Text style={styles.errorNote}>
+                    Your recording is saved on this device. Nothing was lost — retry
+                    when you're ready, or from the History tab later.
+                  </Text>
+                  <Pressable
+                    onPress={retry}
+                    style={({ pressed }) => [styles.retryBtn, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.retryText}>Try now</Text>
+                  </Pressable>
+                </>
+              )}
             </View>
           )}
 
           {stage === 'done' && (
             <View style={styles.block}>
               <View style={styles.doneHead}>
-                <Text style={text.h1}>Done</Text>
+                <Text style={text.h1}>{error ? 'Saved' : 'Done'}</Text>
                 <Pressable
                   onPress={startRecording}
                   style={({ pressed }) => [styles.newBtn, pressed && styles.pressed]}
@@ -250,23 +341,31 @@ export default function RecordScreen() {
                 </Pressable>
               </View>
 
-              {drive && (
-                <Pressable onPress={() => Linking.openURL(drive.folderUrl)}>
+              {folderUrl && (
+                <Pressable onPress={() => Linking.openURL(folderUrl)}>
                   <Text style={styles.link}>Open folder in Drive ↗</Text>
                 </Pressable>
               )}
 
               {summary ? (
                 <View style={styles.card}>
-                  <Text style={styles.cardTitle}>Summary</Text>
-                  <Text style={text.body}>{summary}</Text>
+                  <View style={styles.cardHead}>
+                    <Text style={styles.cardTitle}>Summary</Text>
+                    <CopyButton value={summary} />
+                  </View>
+                  <Text style={text.body} selectable>
+                    {summary}
+                  </Text>
                 </View>
               ) : null}
 
               {transcript ? (
                 <View style={styles.card}>
-                  <Text style={styles.cardTitle}>Transcript</Text>
-                  <Text style={text.body}>{transcript}</Text>
+                  <View style={styles.cardHead}>
+                    <Text style={styles.cardTitle}>Transcript</Text>
+                    <CopyButton value={transcript} />
+                  </View>
+                  <TranscriptView transcript={transcript} />
                 </View>
               ) : null}
             </View>
@@ -283,6 +382,7 @@ function CaptureView(props: {
   metering?: number;
   onTogglePause: () => void;
   onStop: () => void;
+  onCancel: () => void;
 }) {
   const paused = props.stage === 'paused';
   return (
@@ -301,10 +401,10 @@ function CaptureView(props: {
 
       <View style={styles.captureControls}>
         <Pressable
-          onPress={props.onTogglePause}
+          onPress={props.onCancel}
           style={({ pressed }) => [styles.circleBtn, pressed && styles.pressed]}
         >
-          <Text style={styles.circleGlyph}>{paused ? '▶' : '❚❚'}</Text>
+          <Text style={styles.cancelGlyph}>✕</Text>
         </Pressable>
         <Pressable
           onPress={props.onStop}
@@ -312,7 +412,20 @@ function CaptureView(props: {
         >
           <View style={styles.stopSquare} />
         </Pressable>
-        <View style={styles.circleSpacer} />
+        <Pressable
+          onPress={props.onTogglePause}
+          style={({ pressed }) => [styles.circleBtn, pressed && styles.pressed]}
+        >
+          <Text style={styles.circleGlyph}>{paused ? '▶' : '❚❚'}</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.captureLabels}>
+        <Text style={[styles.controlLabel, styles.sideLabel]}>Discard</Text>
+        <Text style={[styles.controlLabel, styles.centreLabel]}>Stop</Text>
+        <Text style={[styles.controlLabel, styles.sideLabel]}>
+          {paused ? 'Resume' : 'Pause'}
+        </Text>
       </View>
 
       <Text style={styles.captureHint}>
@@ -396,8 +509,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  circleSpacer: { width: 60 },
   circleGlyph: { color: colors.text, fontSize: 18, fontWeight: '700' },
+  cancelGlyph: { color: colors.textDim, fontSize: 20, fontWeight: '700' },
+  captureLabels: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: space.xxl,
+    marginTop: space.sm,
+  },
+  // Widths mirror the buttons above (60 / 84 / 60) so each label sits under its
+  // own control rather than drifting out of alignment.
+  controlLabel: {
+    textAlign: 'center',
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textFaint,
+  },
+  sideLabel: { width: 60 },
+  centreLabel: { width: 84 },
   stopBtn: {
     width: 84,
     height: 84,
@@ -428,7 +557,13 @@ const styles = StyleSheet.create({
     padding: space.lg,
     gap: space.sm,
   },
-  cardTitle: { ...text.h2, marginBottom: space.xs },
+  cardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: space.sm,
+  },
+  cardTitle: { ...text.h2 },
   errorCard: {
     backgroundColor: colors.dangerSoft,
     borderRadius: radius.md,
@@ -436,5 +571,14 @@ const styles = StyleSheet.create({
     marginTop: space.lg,
   },
   errorText: { color: '#ffb4ac', fontSize: 14, lineHeight: 20 },
+  errorNote: { color: colors.textDim, fontSize: 13, lineHeight: 19, marginTop: space.md },
+  retryBtn: {
+    marginTop: space.lg,
+    backgroundColor: colors.accent,
+    borderRadius: radius.md,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  retryText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   pressed: { opacity: 0.65 },
 });

@@ -15,6 +15,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { updateSummary, type Meeting } from '../db';
 import { askAboutTranscript, summarizeTranscript } from '../gemini';
+import CopyButton from '../components/CopyButton';
+import TranscriptView from '../components/TranscriptView';
+import { needsRetry, processMeeting, type PipelineStage } from '../pipeline';
 import { formatDuration } from '../recording';
 import { useSettings } from '../SettingsContext';
 import { colors, radius, space, text } from '../theme';
@@ -22,6 +25,13 @@ import { colors, radius, space, text } from '../theme';
 type Tab = 'summary' | 'transcript' | 'ask';
 
 type Exchange = { question: string; answer: string };
+
+const STAGE_LABELS: Record<PipelineStage, string> = {
+  transcribing: 'Transcribing…',
+  summarizing: 'Writing summary…',
+  uploading: 'Saving to Drive…',
+  done: 'Done',
+};
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'summary', label: 'Summary' },
@@ -45,6 +55,25 @@ export default function MeetingDetail(props: {
 
   const [question, setQuestion] = useState('');
   const [thread, setThread] = useState<Exchange[]>([]);
+  const [retryLabel, setRetryLabel] = useState<string | null>(null);
+
+  async function runRetry() {
+    setBusy(true);
+    setError(null);
+    try {
+      await processMeeting({
+        meetingId: meeting.id,
+        settings,
+        onStage: (stage) => setRetryLabel(STAGE_LABELS[stage]),
+      });
+      props.onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRetryLabel(null);
+      setBusy(false);
+    }
+  }
 
   async function generateSummary() {
     setBusy(true);
@@ -132,10 +161,43 @@ export default function MeetingDetail(props: {
           </View>
         )}
 
+        {needsRetry(meeting) && (
+          <View style={styles.retryCard}>
+            <Text style={styles.retryTitle}>
+              {!meeting.transcript ? 'Not transcribed yet' : 'Not saved to Drive yet'}
+            </Text>
+            <Text style={styles.retryBody}>
+              {meeting.audioPath
+                ? meeting.lastError
+                  ? `Last attempt failed: ${meeting.lastError}`
+                  : 'The audio is still on this device.'
+                : 'The audio is no longer on this device, so this cannot be retried.'}
+            </Text>
+            {meeting.audioPath && (
+              <Pressable
+                onPress={runRetry}
+                disabled={busy}
+                style={({ pressed }) => [styles.retryBtn, (busy || pressed) && styles.dim]}
+              >
+                {busy ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.actionText}>{retryLabel ?? 'Try now'}</Text>
+                )}
+              </Pressable>
+            )}
+          </View>
+        )}
+
         {tab === 'summary' && (
           <ScrollView style={styles.pane} contentContainerStyle={styles.paneInner}>
             {summary ? (
-              <Text style={text.body}>{summary}</Text>
+              <>
+                <CopyButton value={summary} label="Copy summary" />
+                <Text style={[text.body, styles.afterCopy]} selectable>
+                  {summary}
+                </Text>
+              </>
             ) : (
               <View style={styles.emptyBox}>
                 <Text style={text.meta}>No summary was generated for this meeting.</Text>
@@ -157,7 +219,10 @@ export default function MeetingDetail(props: {
 
         {tab === 'transcript' && (
           <ScrollView style={styles.pane} contentContainerStyle={styles.paneInner}>
-            <Text style={text.body}>{meeting.transcript}</Text>
+            <CopyButton value={meeting.transcript} label="Copy transcript" />
+            <View style={styles.afterCopy}>
+              <TranscriptView transcript={meeting.transcript} />
+            </View>
           </ScrollView>
         )}
 
@@ -183,7 +248,9 @@ export default function MeetingDetail(props: {
                   <View style={styles.bubble}>
                     <Text style={styles.question}>{item.question}</Text>
                   </View>
-                  <Text style={text.body}>{item.answer}</Text>
+                  <Text style={text.body} selectable>
+                    {item.answer}
+                  </Text>
                 </View>
               ))}
               {busy && <ActivityIndicator color={colors.accent} style={styles.thinking} />}
@@ -271,6 +338,24 @@ const styles = StyleSheet.create({
     marginTop: space.md,
   },
   errorText: { color: '#ffb4ac', fontSize: 13, lineHeight: 19 },
+  retryCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: space.lg,
+    marginHorizontal: space.xl,
+    marginTop: space.md,
+    gap: space.sm,
+  },
+  afterCopy: { marginTop: space.md },
+  retryTitle: { ...text.label, fontSize: 14 },
+  retryBody: { ...text.tiny, lineHeight: 18 },
+  retryBtn: {
+    marginTop: space.sm,
+    backgroundColor: colors.accent,
+    borderRadius: radius.md,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
   pane: {
     flex: 1,
     marginHorizontal: space.xl,

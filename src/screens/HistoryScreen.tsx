@@ -74,13 +74,17 @@ export default function HistoryScreen() {
             </View>
 
             <Text style={styles.rowPreview} numberOfLines={2}>
-              {item.summary ? firstParagraph(item.summary) : item.transcript}
+              {item.summary
+                ? firstParagraph(item.summary)
+                : item.transcript || item.lastError || 'Waiting to be processed.'}
             </Text>
 
             <View style={styles.tags}>
               <Tag label={new Date(item.createdAt).toLocaleDateString()} />
               {item.summary ? <Tag label="Summary" tone="accent" /> : null}
-              {!item.folderUrl && <Tag label="Not in Drive" tone="warn" />}
+              {!item.transcript && <Tag label="Not transcribed" tone="warn" />}
+              {item.transcript && !item.folderUrl && <Tag label="Not in Drive" tone="warn" />}
+              {item.audioPath && <Tag label="Audio on device" />}
             </View>
           </Pressable>
         )}

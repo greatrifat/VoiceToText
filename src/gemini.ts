@@ -1,10 +1,14 @@
-import { GEMINI_MODEL } from './config';
+import { GEMINI_MODELS } from './config';
 import { recordUsage } from './db';
 
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const endpointFor = (model: string) =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
 const TRANSCRIBE_PROMPT = [
   'This is a recording of a meeting. Transcribe it verbatim in the language spoken.',
+  'Format every line exactly as: [MM:SS] Speaker 1: what they said',
+  'The timestamp is when that turn starts, as real elapsed time in the audio.',
+  'Use [HH:MM:SS] instead once the recording passes one hour.',
   'Separate speakers as "Speaker 1:", "Speaker 2:" and so on when you can tell them apart.',
   'Put each speaker turn on its own line. Do not summarise, comment, or add anything',
   'that was not said. If a stretch is inaudible, write [inaudible].',
@@ -27,6 +31,15 @@ const SUMMARY_PROMPT = [
 /** Raised only for 429 / RESOURCE_EXHAUSTED, the one case worth another key. */
 class QuotaError extends Error {}
 
+/** Raised when this account cannot use the model — worth another model. */
+class ModelUnavailableError extends Error {}
+
+/**
+ * Once a model answers for a given key we keep using it, so the fallback walk
+ * costs at most one wasted request per key per app session.
+ */
+const resolvedModel = new Map<string, string>();
+
 type Part = { text: string } | { inline_data: { mime_type: string; data: string } };
 
 /**
@@ -48,32 +61,67 @@ async function callGemini(params: {
   }
 
   let exhausted = 0;
+  let lastModelError: Error | null = null;
+
   for (const apiKey of keys) {
-    try {
-      return await callOnce({ ...params, apiKey });
-    } catch (err) {
-      if (err instanceof QuotaError) {
-        exhausted += 1;
-        continue;
+    // A model already known to work for this key goes first.
+    const known = resolvedModel.get(apiKey);
+    const models = known
+      ? [known, ...GEMINI_MODELS.filter((m) => m !== known)]
+      : GEMINI_MODELS;
+
+    let quotaHit = false;
+
+    for (const model of models) {
+      try {
+        const result = await callOnce({ ...params, apiKey, model });
+        resolvedModel.set(apiKey, model);
+        return result;
+      } catch (err) {
+        if (err instanceof ModelUnavailableError) {
+          lastModelError = err;
+          continue;
+        }
+        if (err instanceof QuotaError) {
+          // Requests-per-day is metered per model, so a sibling model on this
+          // same key still has its own untouched allowance. Only once every
+          // model is spent is the key itself out for the day.
+          quotaHit = true;
+          resolvedModel.delete(apiKey);
+          continue;
+        }
+        throw err;
       }
-      throw err;
+    }
+
+    if (quotaHit) {
+      exhausted += 1;
+      continue;
     }
   }
 
+  if (lastModelError && exhausted === 0) {
+    throw new Error(
+      `No usable Gemini model for this key. Last error: ${lastModelError.message}`
+    );
+  }
+
+  const modelCount = GEMINI_MODELS.length;
   throw new Error(
-    exhausted === keys.length && keys.length > 1
-      ? `All ${keys.length} API keys are out of quota. If they belong to the same Google account they share one limit — add a key from a different account.`
-      : 'API key is out of quota. Try again later or add another key in Settings.'
+    keys.length > 1
+      ? `Daily quota is used up on all ${modelCount} models for all ${keys.length} keys. Free-tier limits reset at midnight Pacific time. If the keys share a Google account they share the same limits — a key from a different account would add headroom.`
+      : `Daily quota is used up on all ${modelCount} models for this key. Free-tier limits reset at midnight Pacific time, or add a key from a different Google account in Settings.`
   );
 }
 
 async function callOnce(params: {
   apiKey: string;
+  model: string;
   parts: Part[];
   temperature: number;
   disableThinking?: boolean;
 }): Promise<string> {
-  const response = await fetch(ENDPOINT, {
+  const response = await fetch(endpointFor(params.model), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': params.apiKey },
     body: JSON.stringify({
@@ -90,8 +138,19 @@ async function callOnce(params: {
   if (response.status === 429) {
     throw new QuotaError(payload?.error?.message ?? 'Quota exceeded');
   }
+
+  const message: string = payload?.error?.message ?? '';
+  // Retired-for-new-accounts models answer 404, but 400 also carries the
+  // "no longer available" wording, so match on the text as well as the status.
+  if (
+    response.status === 404 ||
+    /no longer available|not found|not supported|does not exist/i.test(message)
+  ) {
+    throw new ModelUnavailableError(message || `HTTP ${response.status}`);
+  }
+
   if (!response.ok) {
-    throw new Error(`Gemini request failed: ${payload?.error?.message ?? `HTTP ${response.status}`}`);
+    throw new Error(`Gemini request failed: ${message || `HTTP ${response.status}`}`);
   }
 
   const total = payload?.usageMetadata?.totalTokenCount;
@@ -152,7 +211,8 @@ export async function askAboutTranscript(params: {
   const prompt = [
     'Answer the question using only the meeting transcript below.',
     'If the transcript does not contain the answer, say so plainly rather than guessing.',
-    'Quote the relevant line when it helps. Answer in the language of the question.',
+    'Quote the relevant line when it helps, and cite its [MM:SS] timestamp so the moment',
+    'can be found in the recording. Answer in the language of the question.',
     '',
     '---TRANSCRIPT---',
     params.transcript,
