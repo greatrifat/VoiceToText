@@ -2,12 +2,15 @@
   "expo": {
     "name": "VoiceToText",
     "slug": "VoiceToText",
-    "version": "1.0.0",
+    "version": "2.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "VoiceToText records your meetings so they can be transcribed and saved."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -16,10 +19,20 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "package": "com.robayet.voicetotext",
+      "versionCode": 4,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-audio",
+      "expo-secure-store",
+      "expo-sqlite"
+    ]
   }
 }
