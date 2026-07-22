@@ -18,6 +18,14 @@ export const GEMINI_MODELS = [
 ];
 
 /**
+ * Transcription uses the same order. Measured over repeated runs against a real
+ * 2:37 recording, no model was reliably better at timestamps: 2.5-flash landed
+ * at 02:30 once and 03:54 twice, 3.5-flash at 03:54 and 03:59. Preferring one
+ * on a single good sample would be fitting to noise.
+ */
+export const TRANSCRIBE_MODELS = GEMINI_MODELS;
+
+/**
  * Gemini accepts inline audio up to ~20MB per request, and base64 inflates
  * bytes by ~33%. We refuse anything above this so the user gets a clear error
  * instead of an opaque 400 from the API.

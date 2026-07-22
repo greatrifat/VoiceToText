@@ -22,6 +22,9 @@ import { File } from 'expo-file-system';
 
 import LevelMeter from '../components/LevelMeter';
 import ProcessingSteps, { type Step, type StepState } from '../components/ProcessingSteps';
+import { importAudioFile, pickAudioFile, probeDuration } from '../audioFile';
+import { MAX_INLINE_AUDIO_BYTES } from '../config';
+import { useGeminiActivity } from '../useGeminiActivity';
 import CopyButton from '../components/CopyButton';
 import TranscriptView from '../components/TranscriptView';
 import { getMeeting, insertMeeting } from '../db';
@@ -38,9 +41,17 @@ type Stage =
   | 'transcribing'
   | 'summarizing'
   | 'uploading'
+  | 'posting'
   | 'done';
 
-const ORDER: Stage[] = ['transcribing', 'summarizing', 'uploading'];
+const ORDER: Stage[] = ['transcribing', 'summarizing', 'uploading', 'posting'];
+
+const STEP_LABELS: Record<string, string> = {
+  transcribing: 'Transcribing audio',
+  summarizing: 'Writing summary',
+  uploading: 'Saving to Drive',
+  posting: 'Posting to TaskNote',
+};
 
 export default function RecordScreen() {
   const navigation = useNavigation();
@@ -57,6 +68,7 @@ export default function RecordScreen() {
 
   const capturing = stage === 'recording' || stage === 'paused';
   const processing = ORDER.includes(stage);
+  const geminiNote = useGeminiActivity(processing);
 
   // Immersive only while actually capturing. Processing keeps the normal chrome
   // so the app still looks like itself, and so History stays reachable.
@@ -211,6 +223,7 @@ export default function RecordScreen() {
         folderUrl: null,
         audioPath,
         lastError: null,
+        taskNoteId: null,
       });
     } catch (err) {
       setError(
@@ -220,6 +233,15 @@ export default function RecordScreen() {
       return;
     }
 
+    await runPipeline(meetingId);
+  }
+
+  /**
+   * Shared by recording and importing: once a meeting row exists, both are the
+   * same job. Keeping one copy means an imported file can never quietly get
+   * different handling from a recording.
+   */
+  async function runPipeline(meetingId: number) {
     setSavedId(meetingId);
     setError(null);
 
@@ -243,6 +265,66 @@ export default function RecordScreen() {
       }
       setStage('done');
     }
+  }
+
+  /**
+   * Imports an existing audio file and runs it through the same pipeline. The
+   * file is copied into document storage and the row written before any network
+   * call, exactly as a recording is — so an import that fails mid-transcription
+   * is retryable rather than lost.
+   */
+  async function importFile() {
+    setError(null);
+
+    let picked;
+    try {
+      picked = await pickAudioFile();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (!picked) return;
+
+    // Checked before copying: an oversized file cannot be transcribed, and
+    // saying so now beats writing it to storage first and failing afterwards.
+    if (picked.size > MAX_INLINE_AUDIO_BYTES) {
+      setError(
+        `That file is ${(picked.size / 1024 / 1024).toFixed(1)}MB, above the ` +
+          `${MAX_INLINE_AUDIO_BYTES / 1024 / 1024}MB limit.`
+      );
+      return;
+    }
+
+    setStage('transcribing');
+    const createdAt = Date.now();
+    const title = `Meeting ${new Date(createdAt).toISOString().slice(0, 16).replace('T', ' ')}`;
+
+    let meetingId: number;
+    try {
+      // Unknown duration is survivable — it only costs timestamp rescaling —
+      // so a file that will not load is still imported.
+      const durationSec = await probeDuration(picked.uri);
+      const audioPath = await importAudioFile(picked.uri, String(createdAt), picked.extension);
+      meetingId = await insertMeeting({
+        title,
+        createdAt,
+        durationSec,
+        transcript: '',
+        summary: '',
+        audioUrl: null,
+        transcriptUrl: null,
+        folderUrl: null,
+        audioPath,
+        lastError: null,
+        taskNoteId: null,
+      });
+    } catch (err) {
+      setError(`Could not import the file: ${err instanceof Error ? err.message : String(err)}`);
+      setStage('idle');
+      return;
+    }
+
+    await runPipeline(meetingId);
   }
 
   async function retry() {
@@ -286,7 +368,14 @@ export default function RecordScreen() {
                 {formatDuration(recorderState.durationMillis / 1000)} recorded · keep the app open
               </Text>
               <View style={styles.gap}>
-                <ProcessingSteps steps={buildSteps(stage, error)} />
+                <ProcessingSteps
+                  steps={buildSteps(
+                    stage,
+                    error,
+                    Boolean(settings.taskNoteUrl.trim()),
+                    geminiNote
+                  )}
+                />
               </View>
             </View>
           )}
@@ -305,6 +394,12 @@ export default function RecordScreen() {
                 style={({ pressed }) => [styles.startBtn, pressed && styles.pressed]}
               >
                 <Text style={styles.startText}>Start Recording</Text>
+              </Pressable>
+              <Pressable
+                onPress={importFile}
+                style={({ pressed }) => [styles.importBtn, pressed && styles.pressed]}
+              >
+                <Text style={styles.importText}>Import audio file</Text>
               </Pressable>
             </View>
           )}
@@ -435,14 +530,27 @@ function CaptureView(props: {
   );
 }
 
-function buildSteps(stage: Stage, error: string | null): Step[] {
-  const labels = ['Transcribing audio', 'Writing summary', 'Saving to Drive'];
-  const current = ORDER.indexOf(stage);
-  return labels.map((label, index) => {
+/** The TaskNote step only appears when a TaskNote URL is configured. */
+function buildSteps(
+  stage: Stage,
+  error: string | null,
+  withTaskNote: boolean,
+  note: string | null
+): Step[] {
+  const stages = withTaskNote ? ORDER : ORDER.filter((s) => s !== 'posting');
+  const current = stages.indexOf(stage);
+  return stages.map((key, index) => {
     let state: StepState = 'pending';
     if (current > index) state = 'done';
     else if (current === index) state = error ? 'failed' : 'active';
-    return { key: label, label, state };
+    // Only the Gemini stages have a model to report; Drive and TaskNote do not.
+    const showNote = state === 'active' && (key === 'transcribing' || key === 'summarizing');
+    return {
+      key,
+      label: STEP_LABELS[key],
+      state,
+      note: showNote ? note ?? undefined : undefined,
+    };
   });
 }
 
@@ -472,6 +580,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 44,
   },
   startText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+
+  // Secondary to recording, which is what the screen is for.
+  importBtn: {
+    marginTop: space.md,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 13,
+    paddingHorizontal: 28,
+  },
+  importText: { color: colors.textFaint, fontSize: 14, fontWeight: '600' },
 
   capture: { flex: 1, justifyContent: 'space-between', paddingVertical: space.xxl },
   captureTop: { alignItems: 'center', paddingTop: space.lg },

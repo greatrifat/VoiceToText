@@ -27,7 +27,17 @@ function doPost(e) {
       return json({ ok: false, error: 'Missing audioBase64' });
     }
 
-    var baseName = sanitize(p.fileName || 'meeting');
+    // The app sends "<title>.<ext>". The extension is kept on the audio file so
+    // an imported mp3 stays playable, but stripped from the folder name — a
+    // folder called "Sprint planning.mp3" would read as a file.
+    // Matched against known audio extensions rather than "text after the last
+    // dot": a generated title like "Q3 review v1.2" would otherwise lose its
+    // last two characters to a non-existent extension.
+    var rawName = sanitize(p.fileName || 'meeting');
+    var extMatch = rawName.match(/\.(m4a|mp4|mp3|wav|aac|ogg|oga|opus|flac|aiff|aif)$/i);
+    var baseName = extMatch ? rawName.slice(0, rawName.length - extMatch[0].length) : rawName;
+    var audioName = extMatch ? rawName : rawName + '.m4a';
+
     var root = getOrCreateFolder(ROOT_FOLDER_NAME);
 
     // One folder per meeting, so audio, transcript and summary travel together.
@@ -39,7 +49,7 @@ function doPost(e) {
       Utilities.newBlob(
         Utilities.base64Decode(p.audioBase64),
         p.mimeType || 'audio/mp4',
-        baseName + '.m4a'
+        audioName
       )
     );
 

@@ -44,3 +44,8 @@ yarn-error.*
 
 # build output
 *.apk
+
+# TaskNote is its own repo (github.com/greatrifat/tasknote), kept here so the
+# app and the API it posts to can be changed together. Ignored so this repo
+# never commits it as a stray gitlink.
+tasknote/

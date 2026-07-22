@@ -4,7 +4,13 @@ import { colors, radius, space, text } from '../theme';
 
 export type StepState = 'pending' | 'active' | 'done' | 'failed';
 
-export type Step = { key: string; label: string; state: StepState };
+export type Step = {
+  key: string;
+  label: string;
+  state: StepState;
+  /** Live detail under the label, e.g. which model is currently answering. */
+  note?: string;
+};
 
 /**
  * A visible checklist rather than a bare spinner: transcription can run for a
@@ -24,16 +30,19 @@ export default function ProcessingSteps({ steps }: { steps: Step[] }) {
               />
             )}
           </View>
-          <Text
-            style={[
-              styles.label,
-              step.state === 'pending' && styles.labelPending,
-              step.state === 'active' && styles.labelActive,
-              step.state === 'failed' && styles.labelFailed,
-            ]}
-          >
-            {step.label}
-          </Text>
+          <View style={styles.labelColumn}>
+            <Text
+              style={[
+                styles.label,
+                step.state === 'pending' && styles.labelPending,
+                step.state === 'active' && styles.labelActive,
+                step.state === 'failed' && styles.labelFailed,
+              ]}
+            >
+              {step.label}
+            </Text>
+            {Boolean(step.note) && <Text style={styles.note}>{step.note}</Text>}
+          </View>
         </View>
       ))}
     </View>
@@ -90,7 +99,9 @@ const styles = StyleSheet.create({
   markerGlyph: { color: '#fff', fontSize: 15, fontWeight: '800' },
   rail: { width: 2, height: 26, backgroundColor: colors.border, marginVertical: 2 },
   railDone: { backgroundColor: colors.accent },
-  label: { ...text.label, paddingTop: 5, flex: 1 },
+  labelColumn: { flex: 1 },
+  label: { ...text.label, paddingTop: 5 },
+  note: { ...text.tiny, marginTop: 2 },
   labelPending: { color: colors.textFaint, fontWeight: '500' },
   labelActive: { color: colors.text },
   labelFailed: { color: colors.danger },

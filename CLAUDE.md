@@ -72,6 +72,34 @@ says so instead of offering a button that would fail.
 Summarization is wrapped in its own try/catch — a failed summary is recoverable
 from History, and must never block the upload.
 
+### TaskNote mirror
+
+`src/tasknote.ts` posts a finished meeting to a TaskNote instance
+(`POST {taskNoteUrl}/api/meetings`) so the transcript, summary and Drive folder
+link are readable from the web app too. It is **optional**: a blank
+`taskNoteUrl` skips the stage entirely and the recorder works unchanged.
+
+It runs **last** in `pipeline.ts`, after Drive, because it forwards the folder
+URL that stage produces. It has its own try/catch for the same reason
+summarization does — the meeting is already safely transcribed and uploaded by
+then, so an unreachable TaskNote records `lastError` and leaves the meeting
+otherwise complete rather than failing it. Retrying from History re-posts.
+
+Posts carry `externalId: voicetotext-<createdAt>` and TaskNote upserts on it, so
+a post whose response was lost updates the same meeting instead of creating a
+second copy. `taskNoteId` (v5) is the local record that the post landed.
+
+`needsRetry` takes optional settings because an unposted meeting is only
+outstanding when a TaskNote URL is configured. `canRetry` is separate because a
+TaskNote-only retry does not need the audio — everything it sends is already in
+SQLite — while the transcript and Drive stages do.
+
+**A phone cannot reach `localhost`.** The TaskNote URL must be the dev machine's
+LAN address or a deployed host. A plain-`http://` LAN address also needs
+cleartext traffic allowed in the release APK (`expo-build-properties` with
+`android.usesCleartextTraffic`), which this repo does not currently configure —
+https works as-is.
+
 ### Database migrations
 
 `src/db.ts` migrates on `PRAGMA user_version`. Each version is an append-only

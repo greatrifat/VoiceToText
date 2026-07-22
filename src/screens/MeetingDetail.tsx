@@ -17,9 +17,11 @@ import { updateSummary, type Meeting } from '../db';
 import { askAboutTranscript, summarizeTranscript } from '../gemini';
 import CopyButton from '../components/CopyButton';
 import TranscriptView from '../components/TranscriptView';
-import { needsRetry, processMeeting, type PipelineStage } from '../pipeline';
+import { canRetry, needsRetry, processMeeting, type PipelineStage } from '../pipeline';
+import { useGeminiActivity } from '../useGeminiActivity';
 import { formatDuration } from '../recording';
 import { useSettings } from '../SettingsContext';
+import { apiKeyValues } from '../settings';
 import { colors, radius, space, text } from '../theme';
 
 type Tab = 'summary' | 'transcript' | 'ask';
@@ -30,6 +32,7 @@ const STAGE_LABELS: Record<PipelineStage, string> = {
   transcribing: 'Transcribing…',
   summarizing: 'Writing summary…',
   uploading: 'Saving to Drive…',
+  posting: 'Posting to TaskNote…',
   done: 'Done',
 };
 
@@ -51,6 +54,9 @@ export default function MeetingDetail(props: {
   const [tab, setTab] = useState<Tab>('summary');
   const [summary, setSummary] = useState(meeting.summary);
   const [busy, setBusy] = useState(false);
+  // Which model is answering, so a long retry is visibly working rather than
+  // just spinning — the fallback walk can try several before one lands.
+  const geminiNote = useGeminiActivity(busy);
   const [error, setError] = useState<string | null>(null);
 
   const [question, setQuestion] = useState('');
@@ -80,11 +86,11 @@ export default function MeetingDetail(props: {
     setError(null);
     try {
       const result = await summarizeTranscript({
-        apiKeys: settings.apiKeys,
+        apiKeys: apiKeyValues(settings),
         transcript: meeting.transcript,
       });
-      setSummary(result);
-      await updateSummary(meeting.id, result);
+      setSummary(result.summary);
+      await updateSummary(meeting.id, result.summary);
       props.onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -101,7 +107,7 @@ export default function MeetingDetail(props: {
     setQuestion('');
     try {
       const answer = await askAboutTranscript({
-        apiKeys: settings.apiKeys,
+        apiKeys: apiKeyValues(settings),
         transcript: meeting.transcript,
         question: q,
       });
@@ -161,19 +167,25 @@ export default function MeetingDetail(props: {
           </View>
         )}
 
-        {needsRetry(meeting) && (
+        {needsRetry(meeting, settings) && (
           <View style={styles.retryCard}>
             <Text style={styles.retryTitle}>
-              {!meeting.transcript ? 'Not transcribed yet' : 'Not saved to Drive yet'}
+              {!meeting.transcript
+                ? 'Not transcribed yet'
+                : !meeting.folderUrl
+                  ? 'Not saved to Drive yet'
+                  : 'Not posted to TaskNote yet'}
             </Text>
             <Text style={styles.retryBody}>
-              {meeting.audioPath
+              {canRetry(meeting)
                 ? meeting.lastError
                   ? `Last attempt failed: ${meeting.lastError}`
-                  : 'The audio is still on this device.'
+                  : meeting.folderUrl
+                    ? 'Everything needed is already saved on this device.'
+                    : 'The audio is still on this device.'
                 : 'The audio is no longer on this device, so this cannot be retried.'}
             </Text>
-            {meeting.audioPath && (
+            {canRetry(meeting) && (
               <Pressable
                 onPress={runRetry}
                 disabled={busy}
@@ -186,6 +198,7 @@ export default function MeetingDetail(props: {
                 )}
               </Pressable>
             )}
+            {busy && geminiNote && <Text style={styles.geminiNote}>{geminiNote}</Text>}
           </View>
         )}
 
@@ -356,6 +369,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     alignItems: 'center',
   },
+  geminiNote: { ...text.tiny, marginTop: space.sm, textAlign: 'center' },
   pane: {
     flex: 1,
     marginHorizontal: space.xl,

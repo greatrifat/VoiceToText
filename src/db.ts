@@ -13,6 +13,8 @@ export type Meeting = {
   /** Local file, kept until the Drive upload succeeds so a retry is possible. */
   audioPath: string | null;
   lastError: string | null;
+  /** TaskNote's `id` once the meeting has been posted there; null until then. */
+  taskNoteId: string | null;
 };
 
 export type NewMeeting = Omit<Meeting, 'id'>;
@@ -81,6 +83,59 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 4;
     `);
   }
+
+  if (version < 5) {
+    await db.execAsync(`
+      ALTER TABLE meetings ADD COLUMN taskNoteId TEXT;
+      PRAGMA user_version = 5;
+    `);
+  }
+
+  if (version < 6) {
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS model_state (
+        keyHash TEXT NOT NULL,
+        model TEXT NOT NULL,
+        status TEXT NOT NULL,
+        day TEXT,
+        PRIMARY KEY (keyHash, model)
+      );
+      PRAGMA user_version = 6;
+    `);
+  }
+}
+
+export type ModelStatus = 'ok' | 'quota' | 'unavailable' | 'rejected';
+
+export type ModelStateRow = {
+  keyHash: string;
+  model: string;
+  status: ModelStatus;
+  /** Pacific day the status was recorded, or null when it does not expire. */
+  day: string | null;
+};
+
+/**
+ * What each key/model pair did last time. Held on disk rather than in memory
+ * because the walk is expensive: every model tried re-uploads the whole
+ * recording, so a restart that forgets which models are spent can cost a dozen
+ * uploads of the same audio before anything succeeds.
+ */
+export async function loadModelState(): Promise<ModelStateRow[]> {
+  const db = await getDb();
+  return db.getAllAsync<ModelStateRow>('SELECT keyHash, model, status, day FROM model_state');
+}
+
+export async function saveModelState(row: ModelStateRow): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT INTO model_state (keyHash, model, status, day) VALUES (?, ?, ?, ?)
+     ON CONFLICT(keyHash, model) DO UPDATE SET status = excluded.status, day = excluded.day`,
+    row.keyHash,
+    row.model,
+    row.status,
+    row.day
+  );
 }
 
 /** Patch a subset of columns; used as each pipeline stage completes. */
@@ -136,8 +191,8 @@ export async function insertMeeting(meeting: NewMeeting): Promise<number> {
   const result = await db.runAsync(
     `INSERT INTO meetings
        (title, createdAt, durationSec, transcript, summary,
-        audioUrl, transcriptUrl, folderUrl, audioPath, lastError)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        audioUrl, transcriptUrl, folderUrl, audioPath, lastError, taskNoteId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     meeting.title,
     meeting.createdAt,
     meeting.durationSec,
@@ -147,7 +202,8 @@ export async function insertMeeting(meeting: NewMeeting): Promise<number> {
     meeting.transcriptUrl,
     meeting.folderUrl,
     meeting.audioPath,
-    meeting.lastError
+    meeting.lastError,
+    meeting.taskNoteId
   );
   return result.lastInsertRowId;
 }

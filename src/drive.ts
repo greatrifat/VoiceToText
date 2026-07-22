@@ -1,3 +1,5 @@
+import { fetchWithRetry } from './net';
+
 export type DriveUploadResult = {
   audioUrl: string;
   transcriptUrl: string;
@@ -33,7 +35,7 @@ export async function uploadToDrive(params: {
     form.secret = params.driveSecret;
   }
 
-  const response = await fetch(params.driveUrl, {
+  const response = await fetchWithRetry(params.driveUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(form).toString(),
@@ -64,7 +66,7 @@ export async function uploadToDrive(params: {
 
 /** Cheap GET used by the Settings screen to check a pasted Apps Script URL. */
 export async function verifyDriveUrl(driveUrl: string): Promise<void> {
-  const response = await fetch(driveUrl);
+  const response = await fetchWithRetry(driveUrl);
   const raw = await response.text();
   let payload: any;
   try {
