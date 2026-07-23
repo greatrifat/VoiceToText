@@ -1,4 +1,12 @@
-import { GEMINI_MODELS, TRANSCRIBE_MODELS } from './config';
+import { File, UploadType } from 'expo-file-system';
+
+import {
+  GEMINI_MODELS,
+  TEXT_TIMEOUT_MS,
+  TRANSCRIBE_MODELS,
+  transcribeTimeoutMs,
+  uploadTimeoutMs,
+} from './config';
 import {
   loadModelState,
   recordUsage,
@@ -6,56 +14,40 @@ import {
   type ModelStateRow,
   type ModelStatus,
 } from './db';
-import { fetchWithRetry } from './net';
+import { fetchWithRetry, TimeoutError } from './net';
 
 const endpointFor = (model: string) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
 const TRANSCRIBE_PROMPT = [
-  'Transcribe this meeting recording verbatim, in the language actually spoken.',
+  'Transcribe this meeting verbatim in the language spoken. One segment per',
+  'speaking turn, each with:',
+  '- startSeconds: whole seconds from the start of the audio when the turn begins.',
+  '- speaker: 1 for the first voice, 2 for the next new voice, and so on; keep each',
+  '  number tied to the same voice throughout.',
+  '- text: exactly what was said, original language.',
   '',
-  'A meeting has MORE THAN ONE speaker. Listen for changes in voice, pitch and',
-  'speaking style and attribute each turn to the right person. Producing a single',
-  'speaker for the whole recording is wrong unless it is genuinely a monologue.',
-  '',
-  'Return one segment per speaking turn:',
-  '- startSeconds: when the turn begins, in whole seconds from the start of the audio.',
-  '- speaker: 1 for the first person to talk, 2 for the next new voice, and so on.',
-  '  Keep each number attached to the same voice for the whole recording.',
-  '- text: exactly what was said, in the original language.',
-  '',
-  'Rules:',
-  '- Start a new segment EVERY time the speaker changes, however briefly — including',
-  '  short interjections like "hmm", "yes", "right".',
-  '- If one person talks continuously for more than about 30 seconds, split at a',
-  '  natural sentence boundary rather than emitting one enormous segment.',
-  '- Transcribe only what was said. Do not summarise, translate, or add commentary.',
-  '- Write [inaudible] for anything you cannot make out.',
+  'Meetings usually have several speakers — track changes in voice and split on',
+  'every speaker change, including short interjections ("hmm", "yes"). Split a turn',
+  'longer than ~30s at a sentence boundary. Do not summarise, translate, or comment.',
+  'Write [inaudible] for anything unclear.',
 ].join('\n');
 
 const SUMMARY_PROMPT = [
-  'Below is a meeting transcript. Return a title for the meeting, and a summary.',
+  'From the meeting transcript below, return a title and a summary, both in the',
+  'transcript\'s own language, based strictly on what was said — never infer',
+  'decisions or owners that were not stated.',
   '',
-  'The title names what was actually discussed or decided, in 3 to 8 words.',
-  'No date and no time — the app already records when the meeting happened — and',
-  'no leading "Meeting" or "Call". Sentence case, no trailing full stop.',
+  'title: 3–8 words naming what was discussed or decided. Sentence case, no date,',
+  'time, trailing full stop, or leading "Meeting"/"Call".',
   '',
-  'Write the summary in the same language as the transcript, using these sections',
-  'and nothing else:',
-  '',
-  'OVERVIEW — two or three sentences on what the meeting was about.',
-  'KEY POINTS — bullets of the substantive things discussed.',
-  'DECISIONS — bullets of what was actually decided. Write "None recorded" if nothing was.',
-  'ACTION ITEMS — bullets as "owner — task — deadline". Use "unassigned" or "no deadline"',
-  'where the transcript does not say. Write "None recorded" if there are none.',
-  '',
-  'Base every line strictly on the transcript. Do not infer decisions or owners that were',
-  'not stated. Plain text only, no markdown symbols. Write the title in the same',
-  'language as the transcript too.',
-  '',
-  'Formatting: the summary is a single string, but it must still contain real line',
-  'breaks. Put each section heading on its own line, each bullet on its own line, and',
-  'a blank line between sections. Do not run the sections together into one paragraph.',
+  'summary: plain text (no markdown), these sections only, each heading and each',
+  'bullet on its own line, a blank line between sections:',
+  'OVERVIEW — 2–3 sentences on what the meeting was about.',
+  'KEY POINTS — bullets of the substantive points.',
+  'DECISIONS — bullets of what was decided, or "None recorded".',
+  'ACTION ITEMS — bullets "owner — task — deadline" ("unassigned"/"no deadline"',
+  'where unstated), or "None recorded".',
 ].join('\n');
 
 /**
@@ -102,7 +94,12 @@ export type GeminiAttempt = {
   /** 1-based, so it can be shown as "key 2 of 3" without arithmetic at the UI. */
   keyNumber: number;
   keyCount: number;
-  outcome: 'trying' | 'ok' | 'quota' | 'unavailable' | 'busy' | 'rejected';
+  outcome: 'trying' | 'ok' | 'quota' | 'unavailable' | 'busy' | 'rejected' | 'timeout' | 'uploading';
+  /** Bytes sent so far, only on 'uploading' — lets the UI show "1.2 / 3.1 MB". */
+  sentBytes?: number;
+  totalBytes?: number;
+  /** Wall-clock this attempt took, on terminal outcomes — for the timing log. */
+  ms?: number;
 };
 
 const attemptListeners = new Set<(attempt: GeminiAttempt) => void>();
@@ -209,7 +206,10 @@ function isSpent(row: ModelStateRow | undefined, today: string): boolean {
 /** Cache key: the same API key can resolve differently per model list. */
 const cacheKey = (apiKey: string, models: string[]) => `${apiKey}::${models[0]}`;
 
-type Part = { text: string } | { inline_data: { mime_type: string; data: string } };
+type Part =
+  | { text: string }
+  | { inline_data: { mime_type: string; data: string } }
+  | { file_data: { mime_type: string; file_uri: string } };
 
 /**
  * Forcing an array of segments makes the failure we actually hit — one
@@ -295,10 +295,17 @@ async function callGemini(params: {
   apiKeys: string[];
   parts: Part[];
   temperature: number;
-  disableThinking?: boolean;
   responseSchema?: unknown;
   /** Model order for this call; transcription prefers a different one. */
   models?: string[];
+  /** Deadline for one attempt. See the timeout constants in config.ts. */
+  timeoutMs?: number;
+  /**
+   * When set, the audio is uploaded to the Files API once per key and appended
+   * to `parts` as a file reference, instead of being inlined. This is what makes
+   * a stalled retry cheap — the bytes are already up.
+   */
+  audio?: { audioPath: string; mimeType: string; sizeBytes: number };
 }): Promise<string> {
   const candidates = params.models ?? GEMINI_MODELS;
   const keys = params.apiKeys.map((k) => k.trim()).filter(Boolean);
@@ -327,6 +334,18 @@ async function callGemini(params: {
   // since a key the API refuses is refused for every model.
   const deadKeys = new Set<string>();
   let quotaSeen = false;
+
+  // A stall is the connection, not the model, so a second attempt on a dead link
+  // stalls too — and each attempt is one of the day's ~20 requests. So the first
+  // genuine stall stops the whole walk rather than marching through every model
+  // and key. Quota (429) and availability (404) still fall through normally,
+  // because those are instant and genuinely per key/model.
+  let timeouts = 0;
+  const MAX_TIMEOUTS = 1;
+
+  // Audio uploaded to the Files API, one entry per key. Held for the whole walk
+  // so later model rounds on a key reuse its upload instead of sending again.
+  const uploadedByKey = new Map<string, string>();
 
   for (const model of candidates) {
     // The key that last answered for this model goes first, so a working
@@ -357,18 +376,63 @@ async function callGemini(params: {
         continue;
       }
 
+      // Wall-clock for this one attempt, reported on the terminal event so the
+      // Diagnostics panel can show where a slow stage's seconds actually went.
+      const attemptStart = Date.now();
+      const since = () => Date.now() - attemptStart;
       try {
+        let parts = params.parts;
+        if (params.audio) {
+          // Upload once per key; a stalled generate below then costs only the
+          // reference call, not the recording, when it moves to the next key.
+          let fileUri = uploadedByKey.get(keyHash);
+          if (!fileUri) {
+            emit({ ...where, model, outcome: 'uploading', sentBytes: 0, totalBytes: params.audio.sizeBytes });
+            fileUri = await uploadAudioToGemini({
+              apiKey,
+              audioPath: params.audio.audioPath,
+              mimeType: params.audio.mimeType,
+              sizeBytes: params.audio.sizeBytes,
+              onProgress: (sentBytes, totalBytes) =>
+                emit({ ...where, model, outcome: 'uploading', sentBytes, totalBytes }),
+            });
+            uploadedByKey.set(keyHash, fileUri);
+          }
+          parts = [...params.parts, { file_data: { mime_type: params.audio.mimeType, file_uri: fileUri } }];
+        }
+
         emit({ ...where, model, outcome: 'trying' });
-        const result = await callOnce({ ...params, apiKey, model });
+        const result = await callOnce({ ...params, parts, apiKey, model });
         resolvedModel.set(cacheKey(apiKey, candidates), model);
         await rememberModel(keyHash, model, 'ok');
-        emit({ ...where, model, outcome: 'ok' });
+        emit({ ...where, model, outcome: 'ok', ms: since() });
         return result;
       } catch (err) {
+        if (err instanceof TimeoutError) {
+          emit({ ...where, model, outcome: 'timeout', ms: since() });
+          timeouts += 1;
+          if (timeouts >= MAX_TIMEOUTS) {
+            // One stall is enough: the link, not the model, is the problem, so
+            // the next attempt would stall the same way and cost another request.
+            throw new Error(
+              `The connection stalled with no response from Gemini. ` +
+                `Your recording is saved — tap Try now once you are back on a stable network.`
+            );
+          }
+          continue;
+        }
         if (err instanceof ModelUnavailableError) {
-          // This account has no access to this model; another key may well have.
-          emit({ ...where, model, outcome: 'unavailable' });
-          await rememberModel(keyHash, model, 'unavailable');
+          emit({ ...where, model, outcome: 'unavailable', ms: since() });
+          // Availability is a property of the model, not the individual key, so
+          // one 404 rules it out for every key at once. Without this, an audio
+          // walk would upload the whole recording to each remaining key only to
+          // 404 again — and only the first key's upload is ever reused. Marking
+          // all keys makes them isSpent, so the loop skips them without a second
+          // upload, and future runs skip the model entirely. Same-account keys
+          // share availability; a rare mixed-account setup just settles on a
+          // slightly older flash model, which is a cheap price for not
+          // re-uploading a recording several times over.
+          for (const k of keys) await rememberModel(fingerprint(k), model, 'unavailable');
           lastModelError = err;
           continue;
         }
@@ -377,13 +441,13 @@ async function callGemini(params: {
           // different key is overloaded too. This is the one case that gives up
           // on the model rather than working through the keys — trying them all
           // would re-upload the recording for a predictable failure.
-          emit({ ...where, model, outcome: 'busy' });
+          emit({ ...where, model, outcome: 'busy', ms: since() });
           lastBusyError = err;
           break;
         }
         if (err instanceof InvalidKeyError) {
           // No model will accept a rejected key — rule it out for every round.
-          emit({ ...where, model, outcome: 'rejected' });
+          emit({ ...where, model, outcome: 'rejected', ms: since() });
           await rememberModel(keyHash, model, 'rejected');
           lastKeyError = err;
           deadKeys.add(apiKey);
@@ -393,7 +457,7 @@ async function callGemini(params: {
         if (err instanceof QuotaError) {
           // Requests-per-day is metered per key and per model, so the next key
           // still has its own untouched allowance for this same model.
-          emit({ ...where, model, outcome: 'quota' });
+          emit({ ...where, model, outcome: 'quota', ms: since() });
           await rememberModel(keyHash, model, 'quota');
           quotaSeen = true;
           resolvedModel.delete(cacheKey(apiKey, candidates));
@@ -437,14 +501,162 @@ async function callGemini(params: {
   );
 }
 
+/**
+ * Turns an HTTP status + error text into the taxonomy the walk understands, so
+ * an upload and a generate call classify a 429 or a dead key the same way. Null
+ * means the response is fine. Shared to keep the two call sites from drifting.
+ */
+function classifyError(status: number, message: string): Error | null {
+  if (status === 429) return new QuotaError(message || 'Quota exceeded');
+  if (
+    status === 404 ||
+    /no longer available|not found|not supported|does not exist/i.test(message)
+  ) {
+    return new ModelUnavailableError(message || `HTTP ${status}`);
+  }
+  if (status >= 500 || /high demand|overloaded|try again later/i.test(message)) {
+    return new ModelBusyError(message || `HTTP ${status}`);
+  }
+  if (
+    status === 401 ||
+    status === 403 ||
+    /api key not valid|api key expired|invalid api key|permission denied/i.test(message)
+  ) {
+    return new InvalidKeyError(message || `HTTP ${status}`);
+  }
+  if (status < 200 || status >= 300) {
+    return new Error(`Gemini request failed: ${message || `HTTP ${status}`}`);
+  }
+  return null;
+}
+
+const UPLOAD_BASE = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
+const FILE_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+
+/**
+ * Uploads an audio file to the Files API for one key and returns its file URI.
+ *
+ * The whole point over inline base64: the bytes go up ONCE per key, streamed
+ * off disk rather than held in memory, and every model attempt for that key then
+ * references the URI instead of re-sending the recording. A stalled generate no
+ * longer re-uploads megabytes; only the tiny reference call is retried.
+ *
+ * Errors are mapped onto the same taxonomy as a generate call, so a dead key or
+ * an exhausted quota during upload drives the same fallback.
+ */
+async function uploadAudioToGemini(params: {
+  apiKey: string;
+  audioPath: string;
+  mimeType: string;
+  sizeBytes: number;
+  onProgress?: (sentBytes: number, totalBytes: number) => void;
+}): Promise<string> {
+  const { apiKey, audioPath, mimeType } = params;
+
+  // The declared length MUST match the bytes actually sent, or the resumable
+  // upload is rejected, so it is read from the file rather than trusted from the
+  // caller — a 0 here would corrupt every upload silently.
+  const audioFile = new File(audioPath);
+  const sizeBytes = params.sizeBytes || audioFile.size || 0;
+  if (!sizeBytes) throw new Error('Could not determine the audio file size to upload.');
+
+  // 1) Start a resumable session. Small request, so the standard retry applies.
+  const start = await fetchWithRetry(
+    UPLOAD_BASE,
+    {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': apiKey,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(sizeBytes),
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file: { display_name: 'recording' } }),
+    },
+    { timeoutMs: TEXT_TIMEOUT_MS }
+  );
+  if (!start.ok) {
+    const msg = (await start.json().catch(() => null))?.error?.message ?? '';
+    throw classifyError(start.status, msg) ?? new Error(`Upload start failed: HTTP ${start.status}`);
+  }
+  const uploadUrl = start.headers.get('x-goog-upload-url');
+  if (!uploadUrl) throw new Error('Files API did not return an upload URL.');
+
+  // 2) Send the bytes, streamed from disk with a size-scaled deadline. A stall
+  // here aborts via the signal and surfaces as a TimeoutError, same as generate.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), uploadTimeoutMs(sizeBytes));
+  let result;
+  try {
+    result = await audioFile.upload(uploadUrl, {
+      httpMethod: 'PUT',
+      uploadType: UploadType.BINARY_CONTENT,
+      headers: {
+        'x-goog-api-key': apiKey,
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize',
+      },
+      onProgress: ({ bytesSent, totalBytes }) =>
+        params.onProgress?.(bytesSent, totalBytes || sizeBytes),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new TimeoutError(`Upload stalled after ${Math.round(uploadTimeoutMs(sizeBytes) / 1000)}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const meta = JSON.parse(result.body || '{}');
+  if (result.status < 200 || result.status >= 300) {
+    throw classifyError(result.status, meta?.error?.message ?? '') ??
+      new Error(`Upload failed: HTTP ${result.status}`);
+  }
+  let file = meta.file ?? {};
+
+  // 3) Audio arrives PROCESSING and cannot be referenced until ACTIVE; a small
+  // file is usually ready at once, a long one needs a few seconds.
+  const deadline = Date.now() + TEXT_TIMEOUT_MS;
+  while (file.state === 'PROCESSING') {
+    if (Date.now() > deadline) throw new TimeoutError('File stuck in PROCESSING.');
+    await new Promise((r) => setTimeout(r, 1500));
+    const poll = await fetchWithRetry(
+      `${FILE_BASE}/${file.name}`,
+      { headers: { 'x-goog-api-key': apiKey } },
+      { timeoutMs: TEXT_TIMEOUT_MS }
+    );
+    file = (await poll.json().catch(() => ({}))) ?? {};
+  }
+  if (file.state !== 'ACTIVE' || !file.uri) {
+    throw new Error(`File did not become ACTIVE (state: ${file.state ?? 'unknown'}).`);
+  }
+  return file.uri as string;
+}
+
+/**
+ * Neither transcription nor summarization is a reasoning task, so the model's
+ * default "thinking" is pure latency and wasted tokens — a summary generated 212
+ * thinking tokens and ran 2.5s; at minimal it was 0 tokens and 1.2s. Only the
+ * Gemini 3 family takes `thinkingLevel`; sending it to a 2.5 model 400s, so the
+ * 2.5 fallbacks are left at their default rather than risk breaking them.
+ */
+function thinkingConfigFor(model: string): { thinkingLevel: string } | null {
+  return /^gemini-3/.test(model) ? { thinkingLevel: 'minimal' } : null;
+}
+
 async function callOnce(params: {
   apiKey: string;
   model: string;
   parts: Part[];
   temperature: number;
-  disableThinking?: boolean;
   responseSchema?: unknown;
+  timeoutMs?: number;
 }): Promise<string> {
+  const thinking = thinkingConfigFor(params.model);
   // No in-place 5xx retry: the model list below is the recovery path, and each
   // retry would resend the whole recording to a model already saying it is busy.
   const response = await fetchWithRetry(
@@ -456,49 +668,20 @@ async function callOnce(params: {
         contents: [{ parts: params.parts }],
         generationConfig: {
           temperature: params.temperature,
-          ...(params.disableThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+          ...(thinking ? { thinkingConfig: thinking } : {}),
           ...(params.responseSchema
             ? { responseMimeType: 'application/json', responseSchema: params.responseSchema }
             : {}),
         },
       }),
     },
-    { retryServerErrors: false }
+    { retryServerErrors: false, timeoutMs: params.timeoutMs }
   );
 
   const payload = await response.json().catch(() => null);
-
-  if (response.status === 429) {
-    throw new QuotaError(payload?.error?.message ?? 'Quota exceeded');
-  }
-
   const message: string = payload?.error?.message ?? '';
-  // Retired-for-new-accounts models answer 404, but 400 also carries the
-  // "no longer available" wording, so match on the text as well as the status.
-  if (
-    response.status === 404 ||
-    /no longer available|not found|not supported|does not exist/i.test(message)
-  ) {
-    throw new ModelUnavailableError(message || `HTTP ${response.status}`);
-  }
-
-  // 500/502/504 land here too. These are not retried in place — the next model
-  // is both faster and likelier to work, since overload is per model.
-  if (response.status >= 500 || /high demand|overloaded|try again later/i.test(message)) {
-    throw new ModelBusyError(message || `HTTP ${response.status}`);
-  }
-
-  if (
-    response.status === 401 ||
-    response.status === 403 ||
-    /api key not valid|api key expired|invalid api key|permission denied/i.test(message)
-  ) {
-    throw new InvalidKeyError(message || `HTTP ${response.status}`);
-  }
-
-  if (!response.ok) {
-    throw new Error(`Gemini request failed: ${message || `HTTP ${response.status}`}`);
-  }
+  const classified = classifyError(response.status, message);
+  if (classified) throw classified;
 
   const total = payload?.usageMetadata?.totalTokenCount;
   if (typeof total === 'number') {
@@ -525,8 +708,10 @@ async function callOnce(params: {
 
 export async function transcribeAudio(params: {
   apiKeys: string[];
-  base64Audio: string;
+  /** Local file, uploaded to the Files API and streamed from disk. */
+  audioPath: string;
   mimeType: string;
+  sizeBytes: number;
   /** True recording length, used to pull drifting timestamps back into range. */
   durationSec?: number;
 }): Promise<string> {
@@ -535,10 +720,13 @@ export async function transcribeAudio(params: {
     temperature: 0,
     models: TRANSCRIBE_MODELS,
     responseSchema: TRANSCRIPT_SCHEMA,
-    parts: [
-      { text: TRANSCRIBE_PROMPT },
-      { inline_data: { mime_type: params.mimeType, data: params.base64Audio } },
-    ],
+    timeoutMs: transcribeTimeoutMs(params.durationSec),
+    parts: [{ text: TRANSCRIBE_PROMPT }],
+    audio: {
+      audioPath: params.audioPath,
+      mimeType: params.mimeType,
+      sizeBytes: params.sizeBytes,
+    },
   });
 
   let segments: Segment[] | null = null;
@@ -584,6 +772,7 @@ export async function summarizeTranscript(params: {
     apiKeys: params.apiKeys,
     temperature: 0.2,
     responseSchema: SUMMARY_SCHEMA,
+    timeoutMs: TEXT_TIMEOUT_MS,
     parts: [{ text: `${SUMMARY_PROMPT}\n\n---TRANSCRIPT---\n${params.transcript}` }],
   });
 
@@ -622,6 +811,7 @@ export async function askAboutTranscript(params: {
   return callGemini({
     apiKeys: params.apiKeys,
     temperature: 0.2,
+    timeoutMs: TEXT_TIMEOUT_MS,
     parts: [{ text: prompt }],
   });
 }

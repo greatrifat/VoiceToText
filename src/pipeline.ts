@@ -4,7 +4,7 @@ import { getMeeting, updateMeeting, type Meeting } from './db';
 import { MAX_INLINE_AUDIO_BYTES } from './config';
 import { extensionOf, mimeForPath } from './audioFile';
 import { uploadToDrive } from './drive';
-import { summarizeTranscript, transcribeAudio } from './gemini';
+import { onGeminiAttempt, summarizeTranscript, transcribeAudio } from './gemini';
 import { apiKeyValues, type Settings } from './settings';
 import { postMeetingToTaskNote } from './tasknote';
 
@@ -16,6 +16,77 @@ export type PipelineStage =
   | 'done';
 
 const RECORDINGS_DIR = 'recordings';
+
+/**
+ * Per-stage timing, persisted on the meeting so the numbers are readable on the
+ * device itself — a sideloaded release build has no Metro console to look at.
+ * Every field optional because a retry fills in only the stages it re-ran; the
+ * object is merged onto whatever a previous pass already recorded.
+ */
+/** One line of the model-walk log: what a single attempt did and how long it took. */
+export type AttemptLogRow = { model: string; key: number; outcome: string; ms: number };
+
+export type Timings = {
+  durationSec?: number;
+  audioBytes?: number;
+  /** Reading the file off disk and base64-encoding it, before any network. */
+  base64Ms?: number;
+  transcribeMs?: number;
+  /** Which of the fallback models actually answered, and after how many tries. */
+  transcribeModel?: string | null;
+  transcribeAttempts?: number;
+  /** Per-attempt walk log, so a slow stage shows where its seconds went. */
+  transcribeLog?: AttemptLogRow[];
+  summaryMs?: number;
+  summaryModel?: string | null;
+  summaryLog?: AttemptLogRow[];
+  uploadMs?: number;
+  postMs?: number;
+  /** When this timing was last written, so a stale run is obvious. */
+  updatedAt?: number;
+};
+
+/** Times one awaited operation without changing what it returns. */
+async function timed<T>(fn: () => Promise<T>): Promise<[T, number]> {
+  const t0 = Date.now();
+  const result = await fn();
+  return [result, Date.now() - t0];
+}
+
+function parseTimings(raw: string | null): Timings {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Timings;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Runs `fn` while listening to the Gemini fallback walk, so the timing can
+ * record which model answered and how many attempts it cost. The walk is
+ * sequential within a pipeline, so a single global listener cannot cross wires
+ * between two overlapping calls.
+ */
+async function withAttemptCapture<T>(
+  fn: () => Promise<T>
+): Promise<[T, { model: string | null; attempts: number; log: AttemptLogRow[] }]> {
+  let model: string | null = null;
+  let attempts = 0;
+  const log: AttemptLogRow[] = [];
+  const unsub = onGeminiAttempt((a) => {
+    if (a.outcome === 'trying') attempts += 1;
+    else if (a.outcome === 'ok') model = a.model;
+    // Terminal events carry `ms`; each becomes one line of the walk log.
+    if (a.ms != null) log.push({ model: a.model, key: a.keyNumber, outcome: a.outcome, ms: a.ms });
+  });
+  try {
+    const result = await fn();
+    return [result, { model, attempts, log }];
+  } finally {
+    unsub();
+  }
+}
 
 /**
  * Moves a just-finished recording out of the cache directory, which the OS is
@@ -72,6 +143,16 @@ export async function processMeeting(params: {
   let meeting = await getMeeting(params.meetingId);
   if (!meeting) throw new Error('Meeting not found.');
 
+  // Merged onto whatever a previous pass recorded, then written after each stage.
+  // Keyed off params.meetingId, not `meeting`, so this closure does not capture a
+  // reassigned local — which would cost `meeting` its non-null narrowing below.
+  const timings = parseTimings(meeting.timings);
+  timings.durationSec = meeting.durationSec;
+  const saveTimings = async () => {
+    timings.updatedAt = Date.now();
+    await updateMeeting(params.meetingId, { timings: JSON.stringify(timings) });
+  };
+
   try {
     // --- transcript -------------------------------------------------------
     if (!meeting.transcript) {
@@ -88,18 +169,47 @@ export async function processMeeting(params: {
             `${MAX_INLINE_AUDIO_BYTES / 1024 / 1024}MB limit.`
         );
       }
+      timings.audioBytes = file.size ?? undefined;
+      // Persisted before the call, not just after: a transcription that stalls
+      // and is then killed used to leave no trace at all. Now History at least
+      // shows it was attempted, with the size and length.
+      await saveTimings();
 
       onStage?.('transcribing');
-      const transcript = await transcribeAudio({
-        apiKeys: apiKeyValues(settings),
-        base64Audio: await file.base64(),
-        // Derived from the file rather than assumed: an imported meeting may be
-        // mp3 or wav, and Gemini rejects a type that disagrees with the bytes.
-        mimeType: mimeForPath(meeting.audioPath),
-        durationSec: meeting.durationSec,
-      });
-      await updateMeeting(meeting.id, { transcript, lastError: null });
-      meeting = { ...meeting, transcript };
+      // Bound as consts before the closure so `meeting` (a reassigned `let`)
+      // keeps its non-null narrowing for the rest of the function.
+      const audioPath = meeting.audioPath;
+      // Derived from the file rather than assumed: an imported meeting may be
+      // mp3 or wav, and Gemini rejects a type that disagrees with the bytes.
+      const audioMime = mimeForPath(audioPath);
+      const durationSec = meeting.durationSec;
+      const sizeBytes = file.size ?? 0;
+      const [transcript, transcribeMs] = await timed(() =>
+        withAttemptCapture(() =>
+          transcribeAudio({
+            apiKeys: apiKeyValues(settings),
+            // Uploaded to the Files API once per key and streamed from disk —
+            // no base64 in memory, no re-upload on every fallback attempt.
+            audioPath,
+            mimeType: audioMime,
+            sizeBytes,
+            durationSec,
+          })
+        )
+      );
+      const [text, attempt] = transcript;
+      timings.transcribeMs = transcribeMs;
+      timings.transcribeModel = attempt.model;
+      timings.transcribeAttempts = attempt.attempts;
+      timings.transcribeLog = attempt.log;
+      console.log(
+        `[timing] transcribe ${transcribeMs}ms ` +
+          `via ${attempt.model ?? '?'} (${attempt.attempts} attempt(s))`
+      );
+
+      await updateMeeting(meeting.id, { transcript: text, lastError: null });
+      meeting = { ...meeting, transcript: text };
+      await saveTimings();
     }
 
     // --- summary (and title) ----------------------------------------------
@@ -109,14 +219,28 @@ export async function processMeeting(params: {
     if (!meeting.summary) {
       onStage?.('summarizing');
       try {
-        const result = await summarizeTranscript({
-          apiKeys: apiKeyValues(settings),
-          transcript: meeting.transcript,
-        });
+        const summaryTranscript = meeting.transcript;
+        const [summaryResult, summaryMs] = await timed(() =>
+          withAttemptCapture(() =>
+            summarizeTranscript({
+              apiKeys: apiKeyValues(settings),
+              transcript: summaryTranscript,
+            })
+          )
+        );
+        const [result, summaryAttempt] = summaryResult;
+        timings.summaryMs = summaryMs;
+        timings.summaryModel = summaryAttempt.model;
+        timings.summaryLog = summaryAttempt.log;
+        console.log(
+          `[timing] summary ${summaryMs}ms via ${summaryAttempt.model ?? '?'} ` +
+            `(${summaryAttempt.attempts} attempt(s))`
+        );
         const fields: Partial<Meeting> = { summary: result.summary };
         if (result.title && isPlaceholderTitle(meeting.title)) fields.title = result.title;
         await updateMeeting(meeting.id, fields);
         meeting = { ...meeting, ...fields };
+        await saveTimings();
       } catch {
         // Non-fatal: recoverable later, and never worth blocking the upload.
       }
@@ -133,17 +257,21 @@ export async function processMeeting(params: {
       }
 
       onStage?.('uploading');
-      const result = await uploadToDrive({
+      const uploadBase64 = await file.base64();
+      const uploadArgs = {
         driveUrl: settings.driveUrl,
         driveSecret: settings.driveSecret,
-        base64Audio: await file.base64(),
+        base64Audio: uploadBase64,
         mimeType: mimeForPath(meeting.audioPath),
         // Carries the real extension so Drive stores an mp3 as .mp3 rather than
         // mislabelling it .m4a, which would leave it unplayable in the browser.
         fileName: `${meeting.title}.${extensionOf(meeting.audioPath)}`,
         transcript: meeting.transcript,
         summary: meeting.summary,
-      });
+      };
+      const [result, uploadMs] = await timed(() => uploadToDrive(uploadArgs));
+      timings.uploadMs = uploadMs;
+      console.log(`[timing] upload ${uploadMs}ms`);
 
       // Drive now holds the audio, so the local copy has done its job.
       discardLocalAudio(meeting.audioPath);
@@ -154,6 +282,7 @@ export async function processMeeting(params: {
         audioPath: null,
         lastError: null,
       });
+      await saveTimings();
       meeting = {
         ...meeting,
         audioUrl: result.audioUrl,

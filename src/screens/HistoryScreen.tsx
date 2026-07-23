@@ -1,16 +1,29 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Alert, FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 
 import { deleteMeeting, listMeetings, type Meeting } from '../db';
 import { formatDuration } from '../recording';
+import { useProcessing, type ProcStage } from '../ProcessingContext';
 import { colors, radius, space, text } from '../theme';
 import MeetingDetail from './MeetingDetail';
+
+/** Short label for the row's live processing badge. */
+const PROC_LABEL: Record<ProcStage, string> = {
+  queued: 'Queued…',
+  starting: 'Starting…',
+  transcribing: 'Transcribing…',
+  summarizing: 'Summarizing…',
+  uploading: 'Saving to Drive…',
+  posting: 'Posting…',
+  done: 'Finishing…',
+};
 
 export default function HistoryScreen() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const processing = useProcessing();
 
   const refresh = useCallback(async () => {
     setMeetings(await listMeetings());
@@ -21,6 +34,12 @@ export default function HistoryScreen() {
       refresh();
     }, [refresh])
   );
+
+  // Re-read after any background retry finishes, so a row that was processing
+  // while the user browsed elsewhere picks up its new transcript and tags.
+  useEffect(() => {
+    refresh();
+  }, [processing.version, refresh]);
 
   // Read through the list rather than holding a copy, so a summary generated in
   // the detail view is reflected without reopening.
@@ -80,6 +99,9 @@ export default function HistoryScreen() {
             </Text>
 
             <View style={styles.tags}>
+              {processing.stages[item.id] !== undefined ? (
+                <Tag label={PROC_LABEL[processing.stages[item.id]!]} tone="accent" />
+              ) : null}
               <Tag label={new Date(item.createdAt).toLocaleDateString()} />
               {item.summary ? <Tag label="Summary" tone="accent" /> : null}
               {!item.transcript && <Tag label="Not transcribed" tone="warn" />}

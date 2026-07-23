@@ -15,9 +15,13 @@ export type Meeting = {
   lastError: string | null;
   /** TaskNote's `id` once the meeting has been posted there; null until then. */
   taskNoteId: string | null;
+  /** Per-stage timing as JSON (see pipeline `Timings`); null until measured. */
+  timings: string | null;
 };
 
-export type NewMeeting = Omit<Meeting, 'id'>;
+// `timings` is written by the pipeline as stages run, never at insert time, so
+// it is not part of the shape a caller supplies to create a meeting.
+export type NewMeeting = Omit<Meeting, 'id' | 'timings'>;
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -101,6 +105,13 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
         PRIMARY KEY (keyHash, model)
       );
       PRAGMA user_version = 6;
+    `);
+  }
+
+  if (version < 7) {
+    await db.execAsync(`
+      ALTER TABLE meetings ADD COLUMN timings TEXT;
+      PRAGMA user_version = 7;
     `);
   }
 }

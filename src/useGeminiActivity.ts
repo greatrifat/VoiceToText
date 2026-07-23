@@ -8,12 +8,20 @@ import { onGeminiAttempt, type GeminiAttempt } from './gemini';
  * things and lead to different fixes — a quota wait, a key from another
  * account, or simply trying again in a minute.
  */
+const mb = (bytes?: number) => ((bytes ?? 0) / 1024 / 1024).toFixed(1);
+
 function describe(attempt: GeminiAttempt): string {
   const key = attempt.keyCount > 1 ? ` · key ${attempt.keyNumber}/${attempt.keyCount}` : '';
 
   switch (attempt.outcome) {
+    case 'uploading':
+      // Upload progress, so a big recording going up looks like work rather than
+      // a hang. Falls back to just the size before the first progress tick.
+      return attempt.totalBytes
+        ? `Uploading ${mb(attempt.sentBytes)} / ${mb(attempt.totalBytes)} MB${key}`
+        : `Uploading audio${key}`;
     case 'trying':
-      return `${attempt.model}${key}`;
+      return `Transcribing · ${attempt.model}${key}`;
     case 'ok':
       return `${attempt.model}${key} answered`;
     case 'quota':
@@ -22,6 +30,10 @@ function describe(attempt: GeminiAttempt): string {
       return `${attempt.model} unavailable for this key — next model`;
     case 'busy':
       return `${attempt.model} busy — next model`;
+    case 'timeout':
+      // Named as a connection problem, because that is what it almost always
+      // is — and it points at the fix, which is a better network, not a retry.
+      return 'connection stalled — no response, retrying';
     case 'rejected':
       // With one key there is no next one to move to, so do not promise it.
       return attempt.keyCount > 1
@@ -56,6 +68,16 @@ export function useGeminiActivity(active: boolean): string | null {
         setCurrent(attempt);
         setStartedAt(Date.now());
         setSeconds(0);
+      } else if (attempt.outcome === 'uploading') {
+        // A live phase like 'trying', but it fires repeatedly as bytes go up, so
+        // the elapsed clock is only (re)started when the upload first begins.
+        setCurrent((prev) => {
+          if (prev?.outcome !== 'uploading') {
+            setStartedAt(Date.now());
+            setSeconds(0);
+          }
+          return attempt;
+        });
       } else if (attempt.outcome === 'ok') {
         setCurrent(null);
       } else {

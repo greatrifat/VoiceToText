@@ -8,6 +8,7 @@ import HistoryScreen from './src/screens/HistoryScreen';
 import RecordScreen from './src/screens/RecordScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { SettingsProvider } from './src/SettingsContext';
+import { ProcessingProvider } from './src/ProcessingContext';
 import { colors } from './src/theme';
 
 const Tab = createBottomTabNavigator();
@@ -36,7 +37,8 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SettingsProvider>
-        <NavigationContainer theme={navTheme}>
+        <ProcessingProvider>
+          <NavigationContainer theme={navTheme}>
           <StatusBar style="light" />
           <Tab.Navigator
             screenOptions={({ route }) => ({
@@ -63,7 +65,8 @@ export default function App() {
             <Tab.Screen name="History" component={HistoryScreen} />
             <Tab.Screen name="Settings" component={SettingsScreen} />
           </Tab.Navigator>
-        </NavigationContainer>
+          </NavigationContainer>
+        </ProcessingProvider>
       </SettingsProvider>
     </SafeAreaProvider>
   );
