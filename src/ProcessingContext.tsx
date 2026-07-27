@@ -7,6 +7,10 @@ import {
   type ReactNode,
 } from 'react';
 
+import {
+  acquireForegroundService,
+  releaseForegroundService,
+} from './foregroundService';
 import { processMeeting, type PipelineStage } from './pipeline';
 import { useSettings } from './SettingsContext';
 
@@ -47,6 +51,9 @@ export function ProcessingProvider({ children }: { children: ReactNode }) {
 
   const queue = useRef<number[]>([]);
   const running = useRef(false);
+  // Whether this queue session currently holds the foreground service, so it is
+  // acquired once when work starts and released once when the queue drains.
+  const serviceHeld = useRef(false);
   // Kept in a ref so the queue runner always sees the latest keys/URLs without
   // being torn down and recreated mid-run.
   const settingsRef = useRef(settings);
@@ -59,9 +66,23 @@ export function ProcessingProvider({ children }: { children: ReactNode }) {
   const runNext = useCallback(async () => {
     if (running.current) return;
     const meetingId = queue.current[0];
-    if (meetingId === undefined) return;
+    if (meetingId === undefined) {
+      // Queue drained — release this session's hold on the service.
+      if (serviceHeld.current) {
+        serviceHeld.current = false;
+        await releaseForegroundService();
+      }
+      return;
+    }
 
     running.current = true;
+    // Acquired once per session, on the first job, while the app is still
+    // foregrounded (the enqueue came from a user action) so it legally survives
+    // a later screen lock.
+    if (!serviceHeld.current) {
+      serviceHeld.current = true;
+      await acquireForegroundService();
+    }
     setStage(meetingId, 'starting');
     try {
       await processMeeting({

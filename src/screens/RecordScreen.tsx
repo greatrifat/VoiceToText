@@ -23,6 +23,10 @@ import { File } from 'expo-file-system';
 import LevelMeter from '../components/LevelMeter';
 import ProcessingSteps, { type Step, type StepState } from '../components/ProcessingSteps';
 import { importAudioFile, pickAudioFile, probeDuration } from '../audioFile';
+import {
+  acquireForegroundService,
+  releaseForegroundService,
+} from '../foregroundService';
 import { MAX_INLINE_AUDIO_BYTES } from '../config';
 import { useGeminiActivity } from '../useGeminiActivity';
 import CopyButton from '../components/CopyButton';
@@ -245,6 +249,10 @@ export default function RecordScreen() {
     setSavedId(meetingId);
     setError(null);
 
+    // Hold the foreground service for the whole pipeline so an import/record
+    // that is still transcribing survives the screen locking, exactly as a
+    // History retry does. Acquired here while the app is foregrounded.
+    await acquireForegroundService();
     try {
       const done = await processMeeting({
         meetingId,
@@ -264,6 +272,8 @@ export default function RecordScreen() {
         setFolderUrl(saved.folderUrl);
       }
       setStage('done');
+    } finally {
+      await releaseForegroundService();
     }
   }
 

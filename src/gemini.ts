@@ -33,22 +33,41 @@ const TRANSCRIBE_PROMPT = [
   'Write [inaudible] for anything unclear.',
 ].join('\n');
 
-const SUMMARY_PROMPT = [
-  'From the meeting transcript below, return a title and a summary, both in the',
-  'transcript\'s own language, based strictly on what was said — never infer',
-  'decisions or owners that were not stated.',
-  '',
-  'title: 3–8 words naming what was discussed or decided. Sentence case, no date,',
-  'time, trailing full stop, or leading "Meeting"/"Call".',
-  '',
-  'summary: plain text (no markdown), these sections only, each heading and each',
-  'bullet on its own line, a blank line between sections:',
-  'OVERVIEW — 2–3 sentences on what the meeting was about.',
-  'KEY POINTS — bullets of the substantive points.',
-  'DECISIONS — bullets of what was decided, or "None recorded".',
-  'ACTION ITEMS — bullets "owner — task — deadline" ("unassigned"/"no deadline"',
-  'where unstated), or "None recorded".',
-].join('\n');
+const SUMMARY_PROMPT = `From the meeting transcript below, generate a title and summary.
+
+LANGUAGE — Preserve the transcript's language mix exactly. Write narrative in the transcript's primary language (usually Bengali), while keeping all technical terms, product names, APIs, code identifiers, parameter names, error codes, and English jargon exactly as spoken (e.g. access token, refresh token, force renew, React, Native, API, OMR, HTTP 401). Do not translate these terms into Bengali, and do not rewrite the summary entirely in English unless the transcript itself is entirely English.
+
+CONTENT — Base every statement on the transcript; do not fabricate decisions, deadlines, or conclusions that were not discussed. You MAY attribute an action item's owner when the transcript makes clear who will do it — someone volunteers, is asked and agrees, or is plainly the one handling that work — not only when it is a formal assignment. If something was discussed but not agreed upon, include it under KEY POINTS, not DECISIONS.
+
+TITLE
+- 3–8 words.
+- Describe the meeting's primary topic or main outcome.
+- Sentence case.
+- No "Meeting", date, time, or trailing punctuation.
+
+SUMMARY
+
+Return plain text only (no markdown) using exactly the following sections, with one blank line between each section:
+
+OVERVIEW
+2–3 sentences describing what the meeting was about.
+
+KEY POINTS
+One bullet per substantive discussion point.
+
+DECISIONS
+One bullet per explicit decision.
+If none were recorded, write exactly:
+None recorded
+
+ACTION ITEMS
+One bullet per concrete follow-up task discussed, even if assigned only informally, using:
+owner — task — deadline
+Name the owner whenever the transcript makes clear who will do it; use "unassigned" only when ownership is genuinely unclear, and "no deadline" when none was stated.
+If none were recorded, write exactly:
+None recorded
+
+Preserve the original names of methods, parameters, APIs, payload fields, and status codes exactly as spoken (e.g. force renew, success, data, message, 401, refresh token). Prefer completeness over brevity while avoiding repetition.`;
 
 /**
  * The title rides along with the summary rather than costing its own request.
@@ -611,10 +630,32 @@ async function uploadAudioToGemini(params: {
     clearTimeout(timer);
   }
 
-  const meta = JSON.parse(result.body || '{}');
+  // Status is checked on the RAW body first: the upload endpoint can answer with
+  // plain text or HTML rather than JSON (a transient Google error/notice), and
+  // parsing before this check crashed with an opaque "unexpected character: C…"
+  // instead of a usable error. The raw snippet is carried into the message so a
+  // recurrence shows what actually came back.
+  const body = (result.body || '').toString();
   if (result.status < 200 || result.status >= 300) {
-    throw classifyError(result.status, meta?.error?.message ?? '') ??
-      new Error(`Upload failed: HTTP ${result.status}`);
+    let message = body.slice(0, 300);
+    try {
+      message = JSON.parse(body)?.error?.message ?? message;
+    } catch {
+      // Non-JSON error body — keep the raw snippet as the message.
+    }
+    throw (
+      classifyError(result.status, message) ??
+      new Error(`Upload failed: HTTP ${result.status} — ${message}`)
+    );
+  }
+
+  let meta: { file?: { state?: string; name?: string; uri?: string } };
+  try {
+    meta = JSON.parse(body || '{}');
+  } catch {
+    throw new Error(
+      `Files API returned a non-JSON upload response (HTTP ${result.status}): ${body.slice(0, 200)}`
+    );
   }
   let file = meta.file ?? {};
 
@@ -764,16 +805,54 @@ export function sanitizeTitle(raw: string): string {
     .trim();
 }
 
+/**
+ * The summary is *generated*, not echoed like the transcript, so the model
+ * chooses its language — and generating JSON behind a long English prompt it
+ * defaults to English even when told to match the transcript. Naming the
+ * language concretely (not "the transcript's language") and repeating it right
+ * before generation is what actually holds. Detected from the script rather
+ * than trusting the model to notice: Bengali text lives in U+0980–U+09FF, so if
+ * it outweighs the Latin letters (the English technical terms), the transcript
+ * is Bengali-primary.
+ */
+function summaryLanguageReminder(transcript: string): string {
+  const bengali = (transcript.match(/[ঀ-৿]/g) || []).length;
+  const latin = (transcript.match(/[A-Za-z]/g) || []).length;
+  if (bengali > latin) {
+    return (
+      'LANGUAGE REMINDER — The transcript above is in Bengali. Write the entire ' +
+      'summary (and the title) in Bengali, keeping technical terms, product names ' +
+      'and English jargon in English exactly as spoken. Do NOT write the summary ' +
+      'in English.'
+    );
+  }
+  return 'LANGUAGE REMINDER — Write the entire summary in the same language as the transcript above.';
+}
+
 export async function summarizeTranscript(params: {
   apiKeys: string[];
   transcript: string;
 }): Promise<{ title: string; summary: string }> {
+  const prompt = [
+    SUMMARY_PROMPT,
+    '',
+    '---TRANSCRIPT---',
+    params.transcript,
+    '---END TRANSCRIPT---',
+    '',
+    // Placed after the transcript on purpose: an instruction at the end, right
+    // before generation, is followed far more reliably than one at the top.
+    summaryLanguageReminder(params.transcript),
+  ].join('\n');
+
   const raw = await callGemini({
     apiKeys: params.apiKeys,
-    temperature: 0.2,
+    // Deterministic (was 0.2): sampling variance was letting the same transcript
+    // summarise in Bengali one run and English the next.
+    temperature: 0,
     responseSchema: SUMMARY_SCHEMA,
     timeoutMs: TEXT_TIMEOUT_MS,
-    parts: [{ text: `${SUMMARY_PROMPT}\n\n---TRANSCRIPT---\n${params.transcript}` }],
+    parts: [{ text: prompt }],
   });
 
   // A model that answers with prose instead of JSON still produced a usable

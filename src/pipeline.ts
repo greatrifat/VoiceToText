@@ -128,12 +128,40 @@ function discardLocalAudio(path: string | null): void {
   }
 }
 
+/** Meeting IDs whose pipeline is running right now, across every caller. */
+const inFlight = new Set<number>();
+
+/**
+ * Refuses a second concurrent pipeline for the same meeting. The Record-screen
+ * import/record flow calls this directly while the History queue calls it too,
+ * and neither knows about the other — so without this guard, retrying a meeting
+ * from History while its fresh import is still processing would run two pipelines
+ * at once: double Gemini quota spent and a duplicate Drive folder (folders are
+ * never reused). The `finally` clears the mark on every exit, including an early
+ * throw. The real work lives in `runMeetingPipeline`.
+ */
+export async function processMeeting(params: {
+  meetingId: number;
+  settings: Settings;
+  onStage?: (stage: PipelineStage) => void;
+}): Promise<Meeting> {
+  if (inFlight.has(params.meetingId)) {
+    throw new Error('This meeting is already being processed.');
+  }
+  inFlight.add(params.meetingId);
+  try {
+    return await runMeetingPipeline(params);
+  } finally {
+    inFlight.delete(params.meetingId);
+  }
+}
+
 /**
  * Runs only the stages a meeting still needs, so this doubles as the retry
  * path: a meeting that transcribed but failed to upload re-uploads without
  * paying for transcription again.
  */
-export async function processMeeting(params: {
+async function runMeetingPipeline(params: {
   meetingId: number;
   settings: Settings;
   onStage?: (stage: PipelineStage) => void;

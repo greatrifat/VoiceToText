@@ -33,11 +33,17 @@ export const GEMINI_MODELS = [
 export const TRANSCRIBE_MODELS = GEMINI_MODELS;
 
 /**
- * Gemini accepts inline audio up to ~20MB per request, and base64 inflates
- * bytes by ~33%. We refuse anything above this so the user gets a clear error
- * instead of an opaque 400 from the API.
+ * Max audio size we accept for a meeting. The binding constraint is no longer
+ * Gemini — transcription uploads to the Files API (2GB ceiling) — but the Drive
+ * mirror, which posts the audio base64-encoded in a single form body to the
+ * Apps Script Web App. That endpoint rejects a body over ~45MB on the wire with
+ * HTTP 413 (measured: 45MB accepted, 50MB 413). base64 inflates ~33% and URL-
+ * encoding adds ~6%, so 30MB of audio is ~42MB on the wire — safely under the
+ * limit. Above ~31MB the single POST would 413, which needs a chunked upload,
+ * not a bigger constant. We refuse oversize files up front with a clear message
+ * rather than letting the upload fail opaquely mid-pipeline.
  */
-export const MAX_INLINE_AUDIO_BYTES = 14 * 1024 * 1024;
+export const MAX_INLINE_AUDIO_BYTES = 30 * 1024 * 1024;
 
 /**
  * How long one Gemini attempt may run before it is abandoned as stalled.
