@@ -25,9 +25,11 @@ function describe(attempt: GeminiAttempt): string {
     case 'ok':
       return `${attempt.model}${key} answered`;
     case 'quota':
-      return `${attempt.model} out of quota — next model`;
+      return `${attempt.model} daily quota used on this key — continuing fallback`;
+    case 'rate-limit':
+      return `${attempt.model} temporarily rate-limited — continuing fallback`;
     case 'unavailable':
-      return `${attempt.model} unavailable for this key — next model`;
+      return `${attempt.model} unavailable for this key — continuing fallback`;
     case 'busy':
       return `${attempt.model} busy — next model`;
     case 'timeout':

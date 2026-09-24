@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
+import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 
 import { getTodayUsage, type DailyUsage } from '../db';
 import { verifyDriveUrl } from '../drive';
@@ -128,7 +129,10 @@ export default function SettingsScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <Section title="Gemini API keys">
+          <Section
+            title="Gemini API keys"
+            icon={{ ios: 'key.fill', android: 'key', web: 'key' }}
+          >
             <Text style={styles.sectionHint}>
               Tried in the order below — the number on the left is the position
               processing reports as "key 2 of 4". Name them however you like; the
@@ -143,7 +147,12 @@ export default function SettingsScreen() {
                 <View style={styles.keyHead}>
                   <Text style={styles.keyIndex}>{index + 1}</Text>
                   {draft.apiKeys.length > 1 && (
-                    <Pressable onPress={() => removeKey(index)} hitSlop={10}>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => removeKey(index)}
+                      hitSlop={10}
+                      style={styles.removeButton}
+                    >
                       <Text style={styles.remove}>Remove</Text>
                     </Pressable>
                   )}
@@ -182,6 +191,7 @@ export default function SettingsScreen() {
             ))}
 
             <Pressable
+              accessibilityRole="button"
               onPress={addKey}
               style={({ pressed }) => [styles.addBtn, pressed && styles.pressed]}
             >
@@ -189,7 +199,10 @@ export default function SettingsScreen() {
             </Pressable>
           </Section>
 
-          <Section title="Usage today">
+          <Section
+            title="Usage today"
+            icon={{ ios: 'chart.bar.fill', android: 'bar_chart', web: 'bar_chart' }}
+          >
             <View style={styles.usageRow}>
               <Stat value={formatTokens(usage?.tokens ?? 0)} label="tokens" />
               <Stat value={String(usage?.requests ?? 0)} label="requests" />
@@ -200,7 +213,10 @@ export default function SettingsScreen() {
             </Text>
           </Section>
 
-          <Section title="Google Drive">
+          <Section
+            title="Google Drive"
+            icon={{ ios: 'cloud.fill', android: 'cloud', web: 'cloud' }}
+          >
             <Text style={styles.keyLabel}>Apps Script URL</Text>
             <TextInput
               style={styles.input}
@@ -237,7 +253,10 @@ export default function SettingsScreen() {
             </Text>
           </Section>
 
-          <Section title="TaskNote (optional)">
+          <Section
+            title="TaskNote (optional)"
+            icon={{ ios: 'checklist', android: 'checklist', web: 'checklist' }}
+          >
             <Text style={styles.keyLabel}>TaskNote URL</Text>
             <TextInput
               style={styles.input}
@@ -267,6 +286,7 @@ export default function SettingsScreen() {
           </Section>
 
           <Pressable
+            accessibilityRole="button"
             style={({ pressed }) => [styles.save, pressed && styles.pressed]}
             onPress={onSave}
           >
@@ -280,10 +300,23 @@ export default function SettingsScreen() {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  icon,
+  children,
+}: {
+  title: string;
+  icon: SymbolViewProps['name'];
+  children: React.ReactNode;
+}) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      <View style={styles.sectionHead}>
+        <View style={styles.sectionIcon}>
+          <SymbolView name={icon} size={19} tintColor={colors.accent} />
+        </View>
+        <Text style={styles.sectionTitle}>{title}</Text>
+      </View>
       {children}
     </View>
   );
@@ -308,6 +341,7 @@ function TestRow(props: {
   return (
     <View style={styles.testRow}>
       <Pressable
+        accessibilityRole="button"
         onPress={props.onPress}
         disabled={props.disabled || state.status === 'busy'}
         style={({ pressed }) => [styles.testButton, (props.disabled || pressed) && styles.pressed]}
@@ -339,22 +373,43 @@ function formatTokens(n: number): string {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
-  body: { padding: space.lg, paddingBottom: space.xxl, gap: space.lg },
-  section: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: space.lg,
-    gap: space.md,
+  body: {
+    paddingHorizontal: space.xl,
+    paddingTop: space.sm,
+    paddingBottom: space.xxl,
   },
-  sectionTitle: { ...text.h2 },
-  sectionHint: { ...text.tiny, lineHeight: 18 },
+  section: {
+    paddingVertical: space.xl,
+    gap: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  sectionHead: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  sectionIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.accentSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sectionTitle: { ...text.h2, fontSize: 18 },
+  sectionHint: { color: colors.textFaint, fontSize: 13, lineHeight: 20 },
   em: { color: colors.textDim, fontWeight: '700' },
-  keyBlock: { gap: space.sm },
+  keyBlock: {
+    gap: 10,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: '#192231',
+    padding: space.lg,
+  },
   keyHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   keyLabel: { ...text.label, fontSize: 13 },
   // The position, since that is the order the keys are tried in and what the
   // processing line means by "key 2 of 4". The name below it is the user's.
   keyIndex: { ...text.label, fontSize: 13, color: colors.textFaint },
+  removeButton: { minHeight: 44, justifyContent: 'center' },
   // Monospaced and wrapping, so a pasted key can be read character by character
   // and compared with the one in the Google console.
   keyInput: {
@@ -364,22 +419,24 @@ const styles = StyleSheet.create({
   remove: { color: colors.danger, fontSize: 12, fontWeight: '700' },
   spaced: { marginTop: space.lg },
   input: {
-    backgroundColor: colors.bg,
+    minHeight: 52,
+    backgroundColor: colors.surface,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     color: colors.text,
     paddingHorizontal: space.md,
-    paddingVertical: 12,
+    paddingVertical: 13,
     fontSize: 15,
   },
   addBtn: {
+    minHeight: 52,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     borderStyle: 'dashed',
-    paddingVertical: 12,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   addText: { color: colors.link, fontSize: 14, fontWeight: '600' },
   testRow: { gap: space.sm },
@@ -388,9 +445,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceAlt,
     borderRadius: radius.pill,
     paddingHorizontal: space.lg,
-    paddingVertical: 7,
-    minWidth: 92,
+    minHeight: 48,
+    minWidth: 110,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   testButtonText: { color: colors.text, fontSize: 13, fontWeight: '700' },
   testMessage: { fontSize: 12, lineHeight: 18 },
@@ -399,8 +457,10 @@ const styles = StyleSheet.create({
   usageRow: { flexDirection: 'row', gap: space.md },
   stat: {
     flex: 1,
-    backgroundColor: colors.bg,
+    backgroundColor: colors.surface,
     borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: '#192231',
     paddingVertical: space.lg,
     alignItems: 'center',
     gap: 2,
@@ -414,11 +474,13 @@ const styles = StyleSheet.create({
   statLabel: { ...text.tiny },
   pressed: { opacity: 0.6 },
   save: {
+    minHeight: 60,
+    marginTop: space.xl,
     backgroundColor: colors.accent,
-    borderRadius: radius.md,
-    paddingVertical: 16,
+    borderRadius: radius.lg,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  saveText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  version: { ...text.tiny, textAlign: 'center', marginTop: space.md },
+  saveText: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  version: { ...text.tiny, textAlign: 'center', marginTop: space.lg },
 });

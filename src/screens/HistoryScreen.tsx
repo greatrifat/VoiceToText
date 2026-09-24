@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Alert, FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
+import { SymbolView } from 'expo-symbols';
 
 import { deleteMeeting, listMeetings, type Meeting } from '../db';
 import { formatDuration } from '../recording';
@@ -72,7 +73,13 @@ export default function HistoryScreen() {
         contentContainerStyle={styles.list}
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Text style={styles.emptyGlyph}>🗒</Text>
+            <View style={styles.emptyIcon}>
+              <SymbolView
+                name={{ ios: 'clock.arrow.circlepath', android: 'history', web: 'history' }}
+                size={32}
+                tintColor={colors.textDim}
+              />
+            </View>
             <Text style={text.h2}>No meetings yet</Text>
             <Text style={styles.emptyHint}>
               Recordings appear here once they've been transcribed.
@@ -81,6 +88,8 @@ export default function HistoryScreen() {
         }
         renderItem={({ item }) => (
           <Pressable
+            accessibilityRole="button"
+            accessibilityHint="Opens meeting details"
             style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
             onPress={() => setSelectedId(item.id)}
             onLongPress={() => confirmDelete(item)}
@@ -89,7 +98,14 @@ export default function HistoryScreen() {
               <Text style={styles.rowTitle} numberOfLines={1}>
                 {prettyTitle(item.title)}
               </Text>
-              <Text style={styles.duration}>{formatDuration(item.durationSec)}</Text>
+              <View style={styles.rowMeta}>
+                <Text style={styles.duration}>{formatDuration(item.durationSec)}</Text>
+                <SymbolView
+                  name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
+                  size={18}
+                  tintColor={colors.textFaint}
+                />
+              </View>
             </View>
 
             <Text style={styles.rowPreview} numberOfLines={2}>
@@ -167,26 +183,43 @@ function firstParagraph(summary: string): string {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
-  list: { padding: space.lg, gap: space.md, paddingBottom: space.xxl },
-  empty: { alignItems: 'center', marginTop: 90, gap: space.sm },
-  emptyGlyph: { fontSize: 40, marginBottom: space.sm },
+  list: {
+    paddingHorizontal: space.xl,
+    paddingTop: space.sm,
+    gap: 14,
+    paddingBottom: space.xxl,
+  },
+  empty: { alignItems: 'center', marginTop: 96, gap: space.sm },
+  emptyIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: space.sm,
+  },
   emptyHint: { ...text.meta, textAlign: 'center', paddingHorizontal: 40 },
   row: {
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: space.lg,
-    gap: space.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: '#192231',
+    paddingHorizontal: space.lg,
+    paddingVertical: 18,
+    gap: 10,
   },
   rowPressed: { backgroundColor: colors.surfaceAlt },
   rowHead: { flexDirection: 'row', alignItems: 'center', gap: space.md },
-  rowTitle: { ...text.h2, flex: 1 },
+  rowTitle: { ...text.h2, flex: 1, fontSize: 18, lineHeight: 24 },
+  rowMeta: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   duration: {
     ...text.tiny,
     fontVariant: ['tabular-nums'],
     color: colors.textDim,
   },
-  rowPreview: { fontSize: 14, lineHeight: 20, color: colors.textDim },
-  tags: { flexDirection: 'row', gap: space.sm, marginTop: space.xs, flexWrap: 'wrap' },
+  rowPreview: { fontSize: 14, lineHeight: 22, color: colors.textDim },
+  tags: { flexDirection: 'row', gap: 6, marginTop: space.xs, flexWrap: 'wrap' },
   tag: {
     backgroundColor: colors.surfaceAlt,
     borderRadius: radius.sm,

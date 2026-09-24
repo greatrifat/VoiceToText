@@ -83,8 +83,15 @@ const SUMMARY_SCHEMA = {
   required: ['title', 'summary'],
 };
 
-/** Raised only for 429 / RESOURCE_EXHAUSTED, the one case worth another key. */
+/** Raised only when a 429 explicitly identifies a daily quota limit. */
 class QuotaError extends Error {}
+
+/**
+ * Raised for short-window or ambiguous 429s. Unlike a daily quota failure this
+ * must not be remembered until midnight: RPM/TPM limits recover on their own,
+ * and a bare RESOURCE_EXHAUSTED response does not prove which limit fired.
+ */
+class RateLimitError extends Error {}
 
 /** Raised when this account cannot use the model — worth another model. */
 class ModelUnavailableError extends Error {}
@@ -113,7 +120,16 @@ export type GeminiAttempt = {
   /** 1-based, so it can be shown as "key 2 of 3" without arithmetic at the UI. */
   keyNumber: number;
   keyCount: number;
-  outcome: 'trying' | 'ok' | 'quota' | 'unavailable' | 'busy' | 'rejected' | 'timeout' | 'uploading';
+  outcome:
+    | 'trying'
+    | 'ok'
+    | 'quota'
+    | 'rate-limit'
+    | 'unavailable'
+    | 'busy'
+    | 'rejected'
+    | 'timeout'
+    | 'uploading';
   /** Bytes sent so far, only on 'uploading' — lets the UI show "1.2 / 3.1 MB". */
   sentBytes?: number;
   totalBytes?: number;
@@ -202,9 +218,10 @@ async function rememberModel(
   model: string,
   status: ModelStatus
 ): Promise<void> {
-  // 404 is a property of the account, not of today — a model retired for this
-  // key does not come back tomorrow, so it is remembered without an expiry.
-  const day = status === 'unavailable' ? null : pacificDay();
+  // Availability can differ between projects and can change as Google rolls a
+  // model out or grants access. Remember a 404 for this key today so retries do
+  // not repeat a known failure, but probe it again after the Pacific-day reset.
+  const day = pacificDay();
   const row: ModelStateRow = { keyHash, model, status, day };
   (await getModelState()).set(stateKey(keyHash, model), row);
   try {
@@ -217,8 +234,13 @@ async function rememberModel(
 /** True when a remembered failure still applies and the model is worth skipping. */
 function isSpent(row: ModelStateRow | undefined, today: string): boolean {
   if (!row) return false;
-  if (row.status === 'unavailable') return true;
-  if (row.status === 'quota' || row.status === 'rejected') return row.day === today;
+  if (
+    row.status === 'unavailable' ||
+    row.status === 'quota' ||
+    row.status === 'rejected'
+  ) {
+    return row.day === today;
+  }
   return false;
 }
 
@@ -335,6 +357,7 @@ async function callGemini(params: {
   let exhausted = 0;
   let lastModelError: Error | null = null;
   let lastBusyError: Error | null = null;
+  let lastRateLimitError: Error | null = null;
   let lastKeyError: Error | null = null;
   let badKeys = 0;
 
@@ -442,16 +465,11 @@ async function callGemini(params: {
         }
         if (err instanceof ModelUnavailableError) {
           emit({ ...where, model, outcome: 'unavailable', ms: since() });
-          // Availability is a property of the model, not the individual key, so
-          // one 404 rules it out for every key at once. Without this, an audio
-          // walk would upload the whole recording to each remaining key only to
-          // 404 again — and only the first key's upload is ever reused. Marking
-          // all keys makes them isSpent, so the loop skips them without a second
-          // upload, and future runs skip the model entirely. Same-account keys
-          // share availability; a rare mixed-account setup just settles on a
-          // slightly older flash model, which is a cheap price for not
-          // re-uploading a recording several times over.
-          for (const k of keys) await rememberModel(fingerprint(k), model, 'unavailable');
+          // Model access is scoped to the key's Google Cloud project. A 404 for
+          // this project says nothing about the next configured key/project, so
+          // cache only this pair and let the inner loop try the same model with
+          // the remaining keys.
+          await rememberModel(keyHash, model, 'unavailable');
           lastModelError = err;
           continue;
         }
@@ -463,6 +481,14 @@ async function callGemini(params: {
           emit({ ...where, model, outcome: 'busy', ms: since() });
           lastBusyError = err;
           break;
+        }
+        if (err instanceof RateLimitError) {
+          // A short-window 429 may clear in seconds, while another configured
+          // key belongs to a different project and may work immediately. Keep
+          // walking, but do not poison this pair's disk cache for the whole day.
+          emit({ ...where, model, outcome: 'rate-limit', ms: since() });
+          lastRateLimitError = err;
+          continue;
         }
         if (err instanceof InvalidKeyError) {
           // No model will accept a rejected key — rule it out for every round.
@@ -498,6 +524,14 @@ async function callGemini(params: {
     );
   }
 
+  // Short-window throttling is temporary and was deliberately not cached.
+  if (lastRateLimitError && exhausted === 0) {
+    throw new Error(
+      'Gemini is temporarily rate-limiting requests. No daily quota limit was confirmed, ' +
+        'so this was not cached; wait a minute and tap Try now again.'
+    );
+  }
+
   // Overload is temporary, so say so rather than blaming the key or the quota.
   if (lastBusyError && exhausted === 0) {
     throw new Error(
@@ -525,8 +559,31 @@ async function callGemini(params: {
  * an upload and a generate call classify a 429 or a dead key the same way. Null
  * means the response is fine. Shared to keep the two call sites from drifting.
  */
-function classifyError(status: number, message: string): Error | null {
-  if (status === 429) return new QuotaError(message || 'Quota exceeded');
+type GeminiErrorBody = {
+  code?: number | string;
+  message?: string;
+  status?: string;
+  details?: unknown[];
+};
+
+/** True only when Google's response names a per-day limit. */
+function isDailyQuota(message: string, error?: GeminiErrorBody | null): boolean {
+  const evidence = [String(error?.code ?? ''), message, JSON.stringify(error?.details ?? [])].join(
+    ' '
+  );
+  return /quota_exceeded|daily quota|per[\s_-]*day|perday/i.test(evidence);
+}
+
+function classifyError(
+  status: number,
+  message: string,
+  error?: GeminiErrorBody | null
+): Error | null {
+  if (status === 429) {
+    return isDailyQuota(message, error)
+      ? new QuotaError(message || 'Daily quota exceeded')
+      : new RateLimitError(message || 'Temporarily rate limited');
+  }
   if (
     status === 404 ||
     /no longer available|not found|not supported|does not exist/i.test(message)
@@ -597,8 +654,13 @@ async function uploadAudioToGemini(params: {
     { timeoutMs: TEXT_TIMEOUT_MS }
   );
   if (!start.ok) {
-    const msg = (await start.json().catch(() => null))?.error?.message ?? '';
-    throw classifyError(start.status, msg) ?? new Error(`Upload start failed: HTTP ${start.status}`);
+    const payload = await start.json().catch(() => null);
+    const error: GeminiErrorBody | null = payload?.error ?? null;
+    const msg = error?.message ?? '';
+    throw (
+      classifyError(start.status, msg, error) ??
+      new Error(`Upload start failed: HTTP ${start.status}`)
+    );
   }
   const uploadUrl = start.headers.get('x-goog-upload-url');
   if (!uploadUrl) throw new Error('Files API did not return an upload URL.');
@@ -638,13 +700,15 @@ async function uploadAudioToGemini(params: {
   const body = (result.body || '').toString();
   if (result.status < 200 || result.status >= 300) {
     let message = body.slice(0, 300);
+    let error: GeminiErrorBody | null = null;
     try {
-      message = JSON.parse(body)?.error?.message ?? message;
+      error = JSON.parse(body)?.error ?? null;
+      message = error?.message ?? message;
     } catch {
       // Non-JSON error body — keep the raw snippet as the message.
     }
     throw (
-      classifyError(result.status, message) ??
+      classifyError(result.status, message, error) ??
       new Error(`Upload failed: HTTP ${result.status} — ${message}`)
     );
   }
@@ -670,7 +734,16 @@ async function uploadAudioToGemini(params: {
       { headers: { 'x-goog-api-key': apiKey } },
       { timeoutMs: TEXT_TIMEOUT_MS }
     );
-    file = (await poll.json().catch(() => ({}))) ?? {};
+    const payload = await poll.json().catch(() => null);
+    if (!poll.ok) {
+      const error: GeminiErrorBody | null = payload?.error ?? null;
+      const message = error?.message ?? '';
+      throw (
+        classifyError(poll.status, message, error) ??
+        new Error(`File status failed: HTTP ${poll.status}`)
+      );
+    }
+    file = payload?.file ?? {};
   }
   if (file.state !== 'ACTIVE' || !file.uri) {
     throw new Error(`File did not become ACTIVE (state: ${file.state ?? 'unknown'}).`);
@@ -721,7 +794,7 @@ async function callOnce(params: {
 
   const payload = await response.json().catch(() => null);
   const message: string = payload?.error?.message ?? '';
-  const classified = classifyError(response.status, message);
+  const classified = classifyError(response.status, message, payload?.error);
   if (classified) throw classified;
 
   const total = payload?.usageMetadata?.totalTokenCount;

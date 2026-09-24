@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
+import { SymbolView } from 'expo-symbols';
 import {
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
@@ -36,7 +37,7 @@ import { persistRecording, processMeeting } from '../pipeline';
 import { MEETING_RECORDING_OPTIONS, formatDuration } from '../recording';
 import { useSettings } from '../SettingsContext';
 import { validateSettings } from '../settings';
-import { colors, radius, space, text } from '../theme';
+import { bottomTabStyle, colors, radius, space, text } from '../theme';
 
 type Stage =
   | 'idle'
@@ -81,13 +82,7 @@ export default function RecordScreen() {
       headerShown: !capturing,
       tabBarStyle: capturing
         ? { display: 'none' as const }
-        : {
-            backgroundColor: colors.surface,
-            borderTopColor: colors.border,
-            height: 62,
-            paddingBottom: 8,
-            paddingTop: 8,
-          },
+        : bottomTabStyle,
     });
   }, [navigation, capturing]);
 
@@ -392,24 +387,49 @@ export default function RecordScreen() {
 
           {stage === 'idle' && (
             <View style={styles.idle}>
-              <View style={styles.idleArt}>
-                <Text style={styles.idleGlyph}>🎙</Text>
+              <View style={styles.recordHaloOuter}>
+                <View style={styles.recordHaloMiddle}>
+                  <View style={styles.recordHaloInner}>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Start recording"
+                      onPress={startRecording}
+                      style={({ pressed }) => [
+                        styles.recordOrb,
+                        pressed && styles.recordOrbPressed,
+                      ]}
+                    >
+                      <SymbolView
+                        name={{ ios: 'mic.fill', android: 'mic', web: 'mic' }}
+                        size={64}
+                        tintColor="#ffffff"
+                      />
+                    </Pressable>
+                  </View>
+                </View>
               </View>
-              <Text style={text.h1}>Ready to record</Text>
-              <Text style={styles.sub}>
-                Audio is transcribed by Gemini and saved to your Drive.
+              <Text style={styles.idleTitle}>Ready to record</Text>
+              <Text style={styles.idleDescription}>
+                Record a meeting and turn it into a searchable transcript and summary.
               </Text>
               <Pressable
+                accessibilityRole="button"
                 onPress={startRecording}
                 style={({ pressed }) => [styles.startBtn, pressed && styles.pressed]}
               >
-                <Text style={styles.startText}>Start Recording</Text>
+                <Text style={styles.startText}>Start recording</Text>
               </Pressable>
               <Pressable
+                accessibilityRole="button"
                 onPress={importFile}
                 style={({ pressed }) => [styles.importBtn, pressed && styles.pressed]}
               >
-                <Text style={styles.importText}>Import audio file</Text>
+                <SymbolView
+                  name={{ ios: 'square.and.arrow.up', android: 'upload_file', web: 'upload_file' }}
+                  size={22}
+                  tintColor={colors.textDim}
+                />
+                <Text style={styles.importText}>Import audio</Text>
               </Pressable>
             </View>
           )}
@@ -506,22 +526,40 @@ function CaptureView(props: {
 
       <View style={styles.captureControls}>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Discard recording"
           onPress={props.onCancel}
           style={({ pressed }) => [styles.circleBtn, pressed && styles.pressed]}
         >
-          <Text style={styles.cancelGlyph}>✕</Text>
+          <SymbolView
+            name={{ ios: 'xmark', android: 'close', web: 'close' }}
+            size={23}
+            tintColor={colors.textDim}
+          />
         </Pressable>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Stop recording"
           onPress={props.onStop}
           style={({ pressed }) => [styles.stopBtn, pressed && styles.pressed]}
         >
           <View style={styles.stopSquare} />
         </Pressable>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={paused ? 'Resume recording' : 'Pause recording'}
           onPress={props.onTogglePause}
           style={({ pressed }) => [styles.circleBtn, pressed && styles.pressed]}
         >
-          <Text style={styles.circleGlyph}>{paused ? '▶' : '❚❚'}</Text>
+          <SymbolView
+            name={
+              paused
+                ? { ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }
+                : { ios: 'pause.fill', android: 'pause', web: 'pause' }
+            }
+            size={24}
+            tintColor={colors.text}
+          />
         </Pressable>
       </View>
 
@@ -566,41 +604,95 @@ function buildSteps(
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
-  scroll: { padding: space.xl, paddingBottom: space.xxl },
+  scroll: { flexGrow: 1, paddingHorizontal: space.xl, paddingBottom: space.xxl },
   block: { gap: space.md },
   gap: { marginTop: space.sm },
   sub: { ...text.meta, marginTop: -space.xs },
 
-  idle: { alignItems: 'center', paddingTop: 56, gap: space.md },
-  idleArt: {
-    width: 104,
-    height: 104,
-    borderRadius: 52,
-    backgroundColor: colors.surface,
+  idle: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingTop: space.lg,
+    paddingBottom: 64,
+    gap: 0,
+  },
+  recordHaloOuter: {
+    width: 286,
+    height: 286,
+    borderRadius: 143,
+    borderWidth: 1,
+    borderColor: '#132747',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: space.sm,
+    marginBottom: 28,
   },
-  idleGlyph: { fontSize: 42 },
-  startBtn: {
-    marginTop: space.xl,
+  recordHaloMiddle: {
+    width: 246,
+    height: 246,
+    borderRadius: 123,
+    borderWidth: 1,
+    borderColor: '#1a3a70',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordHaloInner: {
+    width: 208,
+    height: 208,
+    borderRadius: 104,
+    borderWidth: 1.5,
+    borderColor: '#2f6cc8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordOrb: {
+    width: 168,
+    height: 168,
+    borderRadius: 84,
     backgroundColor: colors.accent,
-    borderRadius: radius.pill,
-    paddingVertical: 17,
-    paddingHorizontal: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: colors.accent,
+    shadowOpacity: 0.32,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
   },
-  startText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  recordOrbPressed: { backgroundColor: colors.accentPressed, transform: [{ scale: 0.97 }] },
+  idleTitle: { ...text.h1, fontSize: 32, lineHeight: 38, textAlign: 'center' },
+  idleDescription: {
+    color: colors.textDim,
+    fontSize: 16,
+    lineHeight: 24,
+    textAlign: 'center',
+    maxWidth: 340,
+    marginTop: 10,
+  },
+  startBtn: {
+    width: '100%',
+    minHeight: 60,
+    marginTop: 36,
+    backgroundColor: colors.accent,
+    borderRadius: radius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  startText: { color: '#fff', fontSize: 18, fontWeight: '700' },
 
   // Secondary to recording, which is what the screen is for.
   importBtn: {
+    width: '100%',
+    minHeight: 58,
     marginTop: space.md,
-    borderRadius: radius.pill,
+    borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingVertical: 13,
-    paddingHorizontal: 28,
+    flexDirection: 'row',
+    gap: space.md,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  importText: { color: colors.textFaint, fontSize: 14, fontWeight: '600' },
+  importText: { color: colors.textDim, fontSize: 16, fontWeight: '600' },
 
   capture: { flex: 1, justifyContent: 'space-between', paddingVertical: space.xxl },
   captureTop: { alignItems: 'center', paddingTop: space.lg },
@@ -638,8 +730,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  circleGlyph: { color: colors.text, fontSize: 18, fontWeight: '700' },
-  cancelGlyph: { color: colors.textDim, fontSize: 20, fontWeight: '700' },
   captureLabels: {
     flexDirection: 'row',
     justifyContent: 'center',

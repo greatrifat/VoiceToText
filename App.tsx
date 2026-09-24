@@ -1,5 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
-import { Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -9,7 +10,7 @@ import RecordScreen from './src/screens/RecordScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { SettingsProvider } from './src/SettingsContext';
 import { ProcessingProvider } from './src/ProcessingContext';
-import { colors } from './src/theme';
+import { bottomTabStyle, colors } from './src/theme';
 
 const Tab = createBottomTabNavigator();
 
@@ -25,12 +26,10 @@ const navTheme = {
   },
 };
 
-// Emoji rather than an icon font: keeps the APK free of extra font assets and
-// renders identically on every Android version we care about.
-const ICONS: Record<string, string> = {
-  'New Record': '⏺',
-  History: '🕘',
-  Settings: '⚙️',
+const ICONS: Record<string, SymbolViewProps['name']> = {
+  'New Record': { ios: 'mic.fill', android: 'mic', web: 'mic' },
+  History: { ios: 'clock.arrow.circlepath', android: 'history', web: 'history' },
+  Settings: { ios: 'gearshape.fill', android: 'settings', web: 'settings' },
 };
 
 export default function App() {
@@ -43,25 +42,32 @@ export default function App() {
           <Tab.Navigator
             screenOptions={({ route }) => ({
               headerStyle: { backgroundColor: colors.bg },
-              headerTitleStyle: { color: colors.text, fontSize: 20, fontWeight: '700' },
+              headerTitleStyle: { color: colors.text, fontSize: 27, fontWeight: '700' },
               headerTitleAlign: 'left',
               headerShadowVisible: false,
-              tabBarStyle: {
-                backgroundColor: colors.surface,
-                borderTopColor: colors.border,
-                height: 62,
-                paddingBottom: 8,
-                paddingTop: 8,
-              },
-              tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+              tabBarStyle: bottomTabStyle,
+              tabBarHideOnKeyboard: true,
+              tabBarItemStyle: styles.tabItem,
               tabBarActiveTintColor: colors.accent,
               tabBarInactiveTintColor: colors.textFaint,
               tabBarIcon: ({ color }) => (
-                <Text style={{ fontSize: 17, color }}>{ICONS[route.name]}</Text>
+                <SymbolView name={ICONS[route.name]} size={25} tintColor={color} />
+              ),
+              tabBarLabel: ({ focused, color }) => (
+                <View style={styles.tabLabelWrap}>
+                  <Text style={[styles.tabLabel, { color }]}>
+                    {route.name === 'New Record' ? 'Record' : route.name}
+                  </Text>
+                  <View style={[styles.tabIndicator, focused && styles.tabIndicatorActive]} />
+                </View>
               ),
             })}
           >
-            <Tab.Screen name="New Record" component={RecordScreen} />
+            <Tab.Screen
+              name="New Record"
+              component={RecordScreen}
+              options={{ title: 'New recording' }}
+            />
             <Tab.Screen name="History" component={HistoryScreen} />
             <Tab.Screen name="Settings" component={SettingsScreen} />
           </Tab.Navigator>
@@ -71,3 +77,11 @@ export default function App() {
     </SafeAreaProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  tabItem: { paddingTop: 2 },
+  tabLabelWrap: { alignItems: 'center', gap: 4 },
+  tabLabel: { fontSize: 13, lineHeight: 17, fontWeight: '600' },
+  tabIndicator: { width: 26, height: 3, borderRadius: 2, backgroundColor: 'transparent' },
+  tabIndicatorActive: { backgroundColor: colors.accent },
+});

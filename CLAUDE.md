@@ -126,9 +126,13 @@ version did — throws away N-1 models' worth of free requests.
 resolve onto one of them and share its bucket, so they add availability but no
 quota headroom.
 
-The two error classes drive different retries and must stay separate: `QuotaError`
-(429) → next model, then next key. `ModelUnavailableError` (404 / "no longer
-available") → next model only; another key won't help if the account lacks it.
+The error classes drive different retries and must stay separate. A 429 is only
+cached as `QuotaError` when Google's response explicitly identifies a per-day
+limit. Per-minute/per-token and ambiguous 429s are `RateLimitError`: they continue
+the fallback walk without poisoning that key/model pair until midnight.
+`ModelUnavailableError` (404 / "no longer available") marks only that key/model
+pair unavailable for the current Pacific day, then tries the same model with the
+next key/project before downgrading.
 
 ### Audio constraints
 

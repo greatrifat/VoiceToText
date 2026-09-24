@@ -122,7 +122,7 @@ export type ModelStateRow = {
   keyHash: string;
   model: string;
   status: ModelStatus;
-  /** Pacific day the status was recorded, or null when it does not expire. */
+  /** Pacific day the status was recorded; legacy unavailable rows may be null. */
   day: string | null;
 };
 
