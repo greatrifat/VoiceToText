@@ -6,9 +6,9 @@ import * as SecureStore from 'expo-secure-store';
  */
 /**
  * A key and what the user calls it. The name is theirs to choose because the
- * thing that distinguishes two keys — which Google account they belong to — is
- * invisible from the key itself, and "Fallback 2" told them nothing about which
- * account had run out.
+ * thing that distinguishes two keys — which Google Cloud project they belong to
+ * — is invisible from the key itself, and "Fallback 2" told them nothing about
+ * which project had run out.
  */
 export type ApiKey = {
   name: string;
@@ -16,7 +16,7 @@ export type ApiKey = {
 };
 
 export type Settings = {
-  /** In priority order. Later keys are used only after earlier ones hit quota. */
+  /** In priority order within each model's fallback round. */
   apiKeys: ApiKey[];
   driveUrl: string;
   driveSecret: string;

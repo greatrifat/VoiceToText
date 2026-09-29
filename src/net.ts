@@ -14,6 +14,9 @@ const BACKOFF_MS = [1200, 4000];
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Prevents many clients from repeating a failed request in lockstep. */
+const retryDelay = (attempt: number) => BACKOFF_MS[attempt] + Math.floor(Math.random() * 400);
+
 /**
  * Raised when an attempt outlived its deadline. Distinct from a transport error
  * because it is deliberately not retried here — see `timeoutMs` below.
@@ -71,7 +74,7 @@ export async function fetchWithRetry(
         controller ? { ...init, signal: controller.signal } : init
       );
       if (retryServerErrors && retriableStatus(response.status) && attempt < ATTEMPTS - 1) {
-        await sleep(BACKOFF_MS[attempt]);
+        await sleep(retryDelay(attempt));
         continue;
       }
       return response;
@@ -86,7 +89,7 @@ export async function fetchWithRetry(
       // A thrown fetch is a transport failure — DNS, no route, connection reset.
       lastError = err;
       if (attempt < ATTEMPTS - 1) {
-        await sleep(BACKOFF_MS[attempt]);
+        await sleep(retryDelay(attempt));
         continue;
       }
     } finally {

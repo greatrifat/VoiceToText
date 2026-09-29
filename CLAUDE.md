@@ -114,13 +114,12 @@ Each upload creates a **new** subfolder under `VoiceToText Meetings` holding
 on title collision — two meetings silently merging into one folder is worse than
 a duplicate the user can rename.
 
-### Quota is per model, not per account
+### Quota is per model and project, not per API key
 
-Free-tier **requests-per-day is metered separately for each model** (20/day each
-at time of writing). `src/gemini.ts` therefore treats a 429 as a reason to try
-the next model on the *same* key, and only moves to the next key once every
-model in `GEMINI_MODELS` is spent. Getting this backwards — as an earlier
-version did — throws away N-1 models' worth of free requests.
+Free-tier limits vary by model and are enforced per Google Cloud project.
+`src/gemini.ts` therefore tries a model across the configured projects before
+downgrading to the next model. Multiple keys from one project share quota;
+keys from separate projects have separate pools.
 
 `GEMINI_MODELS` must list distinct concrete models. Aliases (`gemini-flash-latest`)
 resolve onto one of them and share its bucket, so they add availability but no
@@ -133,6 +132,11 @@ the fallback walk without poisoning that key/model pair until midnight.
 `ModelUnavailableError` (404 / "no longer available") marks only that key/model
 pair unavailable for the current Pacific day, then tries the same model with the
 next key/project before downgrading.
+
+A 5xx is temporary service trouble, not exhausted quota. `fetchWithRetry`
+performs bounded exponential backoff with jitter before the fallback walk moves
+to the next model. Gemini 3.8/3.7 require `thinkingLevel: low`; older Gemini 3
+models use `minimal`.
 
 ### Audio constraints
 

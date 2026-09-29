@@ -1,5 +1,9 @@
 # VoiceToText
 
+> A Windows desktop edition is available in [DesktopApp](DesktopApp/README.md).
+> It records system/meeting audio and the microphone together, then runs the
+> same Gemini → Drive → optional TaskNote workflow as the mobile app.
+
 Record a meeting → Gemini transcribes and summarises it → audio, transcript and
 summary land in your Google Drive. An optional TaskNote mirror makes the same
 meeting readable from the web.
@@ -18,10 +22,10 @@ The APK ships with **no credentials baked in**. Open **Settings** and fill in:
 | TaskNote URL | optional — a TaskNote instance to mirror finished meetings to |
 
 You can add **more than one Gemini key** and give each a name. Free-tier quota is
-metered per model *and* per key, so extra keys are extra daily headroom: the app
-walks its Flash models on one key, then moves to the next key, until a request
-goes through. In the processing line keys stay numbered by order; the names you
-set are shown on the Settings page.
+metered per model and Google Cloud project, so keys from separate projects add
+daily headroom. The app tries each model across the configured keys before moving
+to the next model. In the processing line keys stay numbered by order; the names
+you set are shown on the Settings page.
 
 The Gemini and Apps Script fields have a **Test** button — use them before
 recording, so a bad key surfaces immediately rather than after you've sat through
@@ -132,9 +136,12 @@ history row leaves the Drive files untouched.
 
 ## Known limit
 
-Recordings are capped at **14MB** (`MAX_INLINE_AUDIO_BYTES`) — roughly **an hour**
-at this bitrate. The app refuses anything larger with a clear message rather than
-failing on an opaque error.
+Audio files are capped at **30MB** (`MAX_INLINE_AUDIO_BYTES`). The built-in
+recorder uses mono AAC at 32kbps, giving a theoretical maximum of about **2 hours
+11 minutes**; plan on roughly **2 hours** in practice. Imported files keep their
+original bitrate, so their duration limit can be much shorter—for example, about
+65 minutes at 64kbps or 32 minutes at 128kbps. The app refuses anything larger
+with a clear message rather than failing on an opaque error.
 
 Transcription itself no longer inlines the audio — it uploads once to the Gemini
 Files API — so the remaining ceiling is the base64 Drive upload path, not Gemini.

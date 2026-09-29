@@ -4,18 +4,21 @@
  * 1. Availability — Google retires models for new sign-ups while grandfathering
  *    existing accounts, so one hardcoded model works for some keys and not others.
  *
- * 2. Quota — free-tier requests-per-day is metered PER MODEL, not per account.
- *    Each entry below carries its own daily allowance (20/day at time of
- *    writing), so exhausting one leaves the rest untouched. Deliberately listed
- *    as distinct concrete models: aliases like `gemini-flash-latest` resolve to
- *    one of these and share its bucket, adding no headroom.
+ * 2. Quota — limits vary by model and are enforced per Google Cloud project.
+ *    Exhausting one concrete model can leave others available. Aliases such as
+ *    `gemini-flash-latest` resolve to a concrete model and do not create an
+ *    additional quota pool.
  */
 export const GEMINI_MODELS = [
-  // Best first. The top three are served to every account (verified with a live
-  // generateContent probe); the 2.5 pair 404s on newer accounts but still works
-  // on older keys, where it adds real fallback, so it stays last.
+  // Best current stable models first. Availability is still scoped to each
+  // key/project: a model can work for one project and return 404 for another.
+  // The 2.5 pair remains last for legacy projects where it still adds fallback.
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
   'gemini-3.6-flash',
   'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
   // The AI Studio console labels this "Gemini 3 Flash", but the API id keeps the
   // -preview suffix (verified against GET /v1beta/models). The plain
   // 'gemini-3-flash' does not exist and 404s.

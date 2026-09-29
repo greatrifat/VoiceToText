@@ -328,9 +328,8 @@ function segmentsToTranscript(segments: Segment[]): string {
  * quality is downgraded. Both orders eventually reach the same set of key/model
  * pairs — this one just spends the good model's allowance first.
  *
- * Note the extra keys only help when they belong to different Google accounts —
- * quota is enforced per project, so several keys from one account share a single
- * pool and will all fail together.
+ * Extra keys add quota only when they belong to different Google Cloud projects.
+ * Multiple keys for one project share the same limits and will fail together.
  */
 async function callGemini(params: {
   apiKeys: string[];
@@ -500,8 +499,8 @@ async function callGemini(params: {
           continue;
         }
         if (err instanceof QuotaError) {
-          // Requests-per-day is metered per key and per model, so the next key
-          // still has its own untouched allowance for this same model.
+          // Quota is per project and model. A key from another configured
+          // project can still have untouched allowance for this same model.
           emit({ ...where, model, outcome: 'quota', ms: since() });
           await rememberModel(keyHash, model, 'quota');
           quotaSeen = true;
@@ -549,8 +548,8 @@ async function callGemini(params: {
   const modelCount = candidates.length;
   throw new Error(
     keys.length > 1
-      ? `Daily quota is used up on all ${modelCount} models for all ${keys.length} keys. Free-tier limits reset at midnight Pacific time. If the keys share a Google account they share the same limits — a key from a different account would add headroom.`
-      : `Daily quota is used up on all ${modelCount} models for this key. Free-tier limits reset at midnight Pacific time, or add a key from a different Google account in Settings.`
+      ? `Daily quota is used up on all ${modelCount} models for all ${keys.length} keys. Free-tier limits reset at midnight Pacific time. Keys from the same Google Cloud project share limits; a key from another project adds headroom.`
+      : `Daily quota is used up on all ${modelCount} models for this key. Free-tier limits reset at midnight Pacific time, or add a key from another Google Cloud project in Settings.`
   );
 }
 
@@ -753,12 +752,13 @@ async function uploadAudioToGemini(params: {
 
 /**
  * Neither transcription nor summarization is a reasoning task, so the model's
- * default "thinking" is pure latency and wasted tokens — a summary generated 212
- * thinking tokens and ran 2.5s; at minimal it was 0 tokens and 1.2s. Only the
- * Gemini 3 family takes `thinkingLevel`; sending it to a 2.5 model 400s, so the
- * 2.5 fallbacks are left at their default rather than risk breaking them.
+ * default "thinking" is pure latency and wasted tokens. Gemini 3.8 and 3.7 no
+ * longer accept `minimal`, so they use their lowest supported level (`low`).
+ * Earlier Gemini 3 models use `minimal`; sending `thinkingLevel` to a 2.5 model
+ * 400s, so the legacy fallbacks are left at their default.
  */
 function thinkingConfigFor(model: string): { thinkingLevel: string } | null {
+  if (/^gemini-3\.(8|7)-flash$/.test(model)) return { thinkingLevel: 'low' };
   return /^gemini-3/.test(model) ? { thinkingLevel: 'minimal' } : null;
 }
 
@@ -771,8 +771,9 @@ async function callOnce(params: {
   timeoutMs?: number;
 }): Promise<string> {
   const thinking = thinkingConfigFor(params.model);
-  // No in-place 5xx retry: the model list below is the recovery path, and each
-  // retry would resend the whole recording to a model already saying it is busy.
+  // A 5xx is temporary service trouble, not quota. The shared request helper
+  // retries it with bounded exponential backoff before the model walk moves on.
+  // Audio is already in the Files API, so this does not re-upload the recording.
   const response = await fetchWithRetry(
     endpointFor(params.model),
     {
@@ -789,7 +790,7 @@ async function callOnce(params: {
         },
       }),
     },
-    { retryServerErrors: false, timeoutMs: params.timeoutMs }
+    { timeoutMs: params.timeoutMs }
   );
 
   const payload = await response.json().catch(() => null);

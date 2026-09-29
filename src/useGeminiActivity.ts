@@ -5,7 +5,7 @@ import { onGeminiAttempt, type GeminiAttempt } from './gemini';
 /**
  * Phrases one attempt for the processing checklist. The failures are worth
  * spelling out rather than collapsing into "retrying": they mean different
- * things and lead to different fixes — a quota wait, a key from another
+ * things and lead to different fixes — a quota wait, a key from another project,
  * account, or simply trying again in a minute.
  */
 const mb = (bytes?: number) => ((bytes ?? 0) / 1024 / 1024).toFixed(1);

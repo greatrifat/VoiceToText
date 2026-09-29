@@ -138,7 +138,7 @@ export default function SettingsScreen() {
               processing reports as "key 2 of 4". Name them however you like; the
               name is only for you. If the first runs out of quota the next is used
               automatically — but only keys from <Text style={styles.em}>different Google
-              accounts</Text> have separate quota. Several keys from one account share a
+              projects</Text> have separate quota. Several keys from one project share a
               single limit.
             </Text>
 

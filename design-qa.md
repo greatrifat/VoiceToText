@@ -58,11 +58,11 @@ The combined comparison makes the header, recorder hero, action stack, and navig
 - Static post-fix evidence: TypeScript passed and the v3.5.10 native release APK built successfully.
 - Cross-screen refinement: v3.5.11 extends the selected design system to History and Settings; TypeScript and the native release build pass.
 - Navigation refinement: v3.5.12 gives the shared bottom bar its own surface, a stronger divider, larger icons and labels, and more vertical clearance so the active indicator no longer crowds Android's gesture area. The bar also hides when the keyboard opens.
-- Visual post-fix evidence: pending v3.5.12 captures from the same device; the report remains blocked until that comparison is completed.
+- Visual post-fix evidence: pending v3.5.13 captures from the same device; the report remains blocked until that comparison is completed. v3.5.13 changes Gemini model selection and retry behavior only, with no additional visual changes.
 
 ## Implementation checklist
 
-1. Install `VoiceToText-v3.5.12.apk` on the same Android device.
+1. Install `VoiceToText-v3.5.13.apk` on the same Android device.
 2. Capture Record, History, and the top of Settings; confirm all three titles are visible.
 3. Add the new frames to same-height comparisons.
 4. Pass only if the recorded P1/P2 issues are visibly resolved and Settings remains readable.
